@@ -7,7 +7,7 @@ Xray REALITY 一键安装脚本
 - 支持 SNI 过滤器模式
 - 自动生成配置和管理脚本
 ## 安装命令
-bash <(curl -fsSL https://raw.githubusercontent.com/shirasawatop/xray-reality-installer/refs/heads/main/xrayREALITY.sh)
+wget -N https://raw.githubusercontent.com/shirasawatop/xray-reality-installer/refs/heads/main/xrayREALITY.sh && bash xrayREALITY.sh
 ## 参考项目
 - oldfriendme/xrayREALITY
 ## 参考项目地址

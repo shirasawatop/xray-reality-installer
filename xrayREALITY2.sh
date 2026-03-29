@@ -26,12 +26,12 @@ detect_ips() {
             continue
         fi
         
-        # 获取IPv4地址
-        ipv4=$(ip -4 addr show $iface 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
-        if [[ -n "$ipv4" ]]; then
+        # 获取所有IPv4地址
+        ipv4_list=$(ip -4 addr show $iface 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+        for ipv4 in $ipv4_list; do
             ipv4_addresses+=("$ipv4")
             ipv4_interfaces+=("$iface: $ipv4")
-        fi
+        done
     done
     
     # 检测IPv6地址
@@ -43,12 +43,12 @@ detect_ips() {
             continue
         fi
         
-        # 获取公网IPv6地址（排除fe80开头的本地链路地址）
-        ipv6=$(ip -6 addr show $iface 2>/dev/null | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -v '^fe80:' | head -1)
-        if [[ -n "$ipv6" ]]; then
+        # 获取所有公网IPv6地址（排除fe80开头的本地链路地址和::1）
+        ipv6_list=$(ip -6 addr show $iface 2>/dev/null | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -v '^fe80:' | grep -v '^::1')
+        for ipv6 in $ipv6_list; do
             ipv6_addresses+=("$ipv6")
             ipv6_interfaces+=("$iface: $ipv6")
-        fi
+        done
     done
     
     # 显示检测结果

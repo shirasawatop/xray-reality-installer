@@ -1,4 +1,4 @@
-# xray-reality-installer
+# xrayREALITY
 Xray REALITY 一键安装脚本
 ## 功能特性
 - 支持 Xray REALITY 协议

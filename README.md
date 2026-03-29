@@ -14,3 +14,8 @@ wget -N https://raw.githubusercontent.com/shirasawatop/xray-reality-installer/re
 https://github.com/oldfriendme/xrayREALITY
 ## 新增功能
 ✓ 浏览器指纹选择
+# xrayREALITY2
+## 新增功能
+√ 执行脚本时选择ipv4出口和ipv6出口
+## 安装命令
+wget -N https://raw.githubusercontent.com/shirasawatop/xray-reality-installer/refs/heads/main/xrayREALITY2.sh && bash xrayREALITY2.sh

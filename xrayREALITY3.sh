@@ -75,7 +75,8 @@ detect_ips() {
 # 调用IP检测函数
 detect_ips
 
-# ========== 修改开始：自动选择AT&T IPv6（2600:开头）作为出口 ==========
+# ========== 自动选择出口IP ==========
+# 自动选择AT&T IPv6（2600:开头）作为主出口
 att_ipv6=""
 for ipv6 in "${ipv6_addresses[@]}"; do
     if [[ "$ipv6" == 2600:* ]]; then
@@ -85,17 +86,25 @@ for ipv6 in "${ipv6_addresses[@]}"; do
 done
 
 if [[ -z "$att_ipv6" ]]; then
-    echo -e "\e[31m未检测到AT&T IPv6（2600:开头）！将降级使用第一个公网IPv6，请检查。\e[0m"
+    echo -e "\e[31m未检测到AT&T IPv6（2600:开头），将降级使用第一个公网IPv6。\e[0m"
     att_ipv6="${ipv6_addresses[0]}"
 fi
 
 echo -e "\e[32m自动选择AT&T IPv6出口: $att_ipv6\e[0m"
 
-# 设置全局出口变量（仅在xray安装时使用）
-ipv4_outbound=""             # 不使用IPv4出口
+# 自动选择IPv4出口（第一个检测到的IPv4）
+ipv4_outbound=""
+if [ ${#ipv4_addresses[@]} -gt 0 ]; then
+    ipv4_outbound="${ipv4_addresses[0]}"
+    echo -e "\e[32m自动选择IPv4出口: $ipv4_outbound\e[0m"
+else
+    echo -e "\e[33m未检测到IPv4地址，将仅使用IPv6出口。\e[0m"
+fi
+
+# 设置全局变量
 ipv6_outbound="$att_ipv6"
 use_ipv6_priority="yes"      # IPv6优先
-# ========== 修改结束 ==========
+# ========== 自动选择出口IP结束 ==========
 
 sec=$(whiptail --title "选择安装的组件" --checklist \
   "使用空格选择，多选后回车确认" 15 50 4 \
@@ -268,7 +277,7 @@ private_old=$(echo "$xray_x25519" | grep "PrivateKey:" | cut -d ' ' -f 2-)
 public_old=$(echo "$xray_x25519" | grep "Password:" | cut -d ' ' -f 2-)
 mkdir ${workdir}/socket
 
-# 生成outbounds配置
+# 生成outbounds配置（使用全局变量 ipv4_outbound, ipv6_outbound）
 generate_outbounds() {
     local outbound_type="$1"
     local socks5IP="$2"
@@ -276,14 +285,10 @@ generate_outbounds() {
     local socks5user="$4"
     local socks5pass="$5"
     
-    # 构建outbounds数组
     local outbounds_json=""
     
     if [[ "$outbound_type" == "socks" ]]; then
-        # SOCKS5出站配置
         outbounds_json='['
-        
-        # 添加IPv6出站（如果配置了）
         if [[ -n "$ipv6_outbound" ]]; then
             outbounds_json+='
         {
@@ -307,8 +312,6 @@ generate_outbounds() {
             "sendThrough": "'"$ipv6_outbound"'"
         },'
         fi
-        
-        # 添加IPv4出站（如果配置了）
         if [[ -n "$ipv4_outbound" ]]; then
             outbounds_json+='
         {
@@ -332,16 +335,12 @@ generate_outbounds() {
             "sendThrough": "'"$ipv4_outbound"'"
         },'
         fi
-        
-        # 移除最后一个逗号
         outbounds_json="${outbounds_json%,}"
         outbounds_json+='
     ]'
     else
-        # 直接出站配置
+        # 直接出站
         outbounds_json='['
-        
-        # 添加IPv6出站（如果配置了）
         if [[ -n "$ipv6_outbound" ]]; then
             outbounds_json+='
         {
@@ -353,8 +352,6 @@ generate_outbounds() {
             "sendThrough": "'"$ipv6_outbound"'"
         },'
         fi
-        
-        # 添加IPv4出站（如果配置了）
         if [[ -n "$ipv4_outbound" ]]; then
             outbounds_json+='
         {
@@ -366,8 +363,6 @@ generate_outbounds() {
             "sendThrough": "'"$ipv4_outbound"'"
         },'
         fi
-        
-        # 移除最后一个逗号
         outbounds_json="${outbounds_json%,}"
         outbounds_json+='
     ]'
@@ -376,15 +371,13 @@ generate_outbounds() {
     echo "$outbounds_json"
 }
 
-# 生成routing配置
+# 生成routing配置（IPv6优先）
 generate_routing() {
     local routing_json=''
     
-    # 如果配置了IPv6和IPv4
     if [[ -n "$ipv6_outbound" ]] && [[ -n "$ipv4_outbound" ]]; then
-        if [[ "$use_ipv6_priority" == "yes" ]]; then
-            # IPv6优先
-            routing_json='
+        # 两个出口都存在，IPv6优先
+        routing_json='
     "routing": {
         "domainStrategy": "IPOnDemand",
         "rules": [
@@ -400,27 +393,7 @@ generate_routing() {
             }
         ]
     }'
-        else
-            # IPv4优先
-            routing_json='
-    "routing": {
-        "domainStrategy": "IPOnDemand",
-        "rules": [
-            {
-                "type": "field",
-                "outboundTag": "direct-ipv4",
-                "ip": ["0.0.0.0/0"]
-            },
-            {
-                "type": "field",
-                "outboundTag": "direct-ipv6",
-                "ip": ["2000::/3", "::/0"]
-            }
-        ]
-    }'
-        fi
     elif [[ -n "$ipv6_outbound" ]]; then
-        # 只有IPv6
         routing_json='
     "routing": {
         "domainStrategy": "IPIfNonMatch",
@@ -433,7 +406,6 @@ generate_routing() {
         ]
     }'
     elif [[ -n "$ipv4_outbound" ]]; then
-        # 只有IPv4
         routing_json='
     "routing": {
         "domainStrategy": "IPIfNonMatch",
@@ -446,7 +418,6 @@ generate_routing() {
         ]
     }'
     else
-        # 没有配置出口IP，使用默认
         routing_json=''
     fi
     
@@ -467,7 +438,6 @@ read socks5user
 echo -e "\e[32m请输入socks5 pass,格式: password\e[0m"
 read socks5pass
 
-# 生成配置
 outbounds_config=$(generate_outbounds "socks" "$socks5IP" "$socks5port" "$socks5user" "$socks5pass")
 routing_config=$(generate_routing)
 
@@ -913,19 +883,16 @@ ln -s ${workdir}/xrayhelp /usr/bin/xray.help
 systemctl enable xray_service
 
 # ==================== 自动更新AT&T IPv6出口 ====================
-# 保存当前AT&T IPv6到文件，供后续比较
 echo "$att_ipv6" > ${workdir}/last_att_ipv6.txt
 
-# 创建自动更新脚本
 cat << 'AUTOUPDATE_SCRIPT' > ${workdir}/auto_update_ip.sh
 #!/bin/bash
 
-workdir="/var/xray"          # root路径，若非root则需改为 $HOME/.xray
+workdir="/var/xray"
 last_ip_file="${workdir}/last_att_ipv6.txt"
 config_sni="${workdir}/sni_config.json"
 config_old="${workdir}/old_config.json"
 
-# 获取当前AT&T IPv6（2600:开头）
 current_ip=""
 for ip in $(ip -6 addr show | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -v '^fe80:' | grep -v '^::1'); do
     if [[ "$ip" == 2600:* ]]; then
@@ -939,7 +906,6 @@ if [[ -z "$current_ip" ]]; then
     exit 0
 fi
 
-# 读取上次保存的IP
 last_ip=$(cat "$last_ip_file" 2>/dev/null)
 if [[ "$current_ip" == "$last_ip" ]]; then
     exit 0
@@ -947,21 +913,16 @@ fi
 
 echo "AT&T IPv6 已变化: $last_ip -> $current_ip"
 
-# 更新配置文件中的 sendThrough
 sed -i "s/\"sendThrough\": \"$last_ip\"/\"sendThrough\": \"$current_ip\"/g" "$config_sni"
 sed -i "s/\"sendThrough\": \"$last_ip\"/\"sendThrough\": \"$current_ip\"/g" "$config_old"
 
-# 保存新的IP
 echo "$current_ip" > "$last_ip_file"
-
-# 重启Xray服务
 systemctl restart xray_service
 echo "Xray已使用新IPv6出口重启"
 AUTOUPDATE_SCRIPT
 
 chmod +x ${workdir}/auto_update_ip.sh
 
-# 添加cron任务（每分钟执行一次）
 (crontab -l 2>/dev/null; echo "* * * * * ${workdir}/auto_update_ip.sh") | crontab -
 
 echo -e "\e[32m已添加自动更新IP的cron任务（每分钟检查）\e[0m"

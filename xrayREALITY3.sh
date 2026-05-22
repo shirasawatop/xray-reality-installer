@@ -1,5 +1,5 @@
 #!/bin/bash
-echo -e "\e[32m欢迎使用REALITY一键脚本 (纯净版)\e[0m"
+echo -e "\e[32m欢迎使用REALITY一键脚本 (最终版)\e[0m"
 echo ""
 echo "         _      _   __        _                   _ "
 echo "   ___  | |  __| | / _| _ __ (_)  ___  _ __    __| |"
@@ -91,7 +91,7 @@ command -v wget > /dev/null 2>&1 || { echo -e "\033[31mwget不存在,请apt inst
 command -v openssl > /dev/null 2>&1 || { echo -e "\033[31mopenssl不存在,请apt install openssl安装\033[0m"; exit; }
 command -v unzip > /dev/null 2>&1 || { echo -e "\033[31munzip不存在,请apt install unzip安装\033[0m"; exit; }
 
-# ---------- 下载并安装 xray ----------
+# ---------- 下载并安装 xray (只下载xray，无hy2) ----------
 [ "$(id -u)" == 0 ] && workdir=/var/xray || workdir=${HOME}/.xray
 mkdir -p ${workdir}
 architecture=$(uname -m)
@@ -102,7 +102,7 @@ case $architecture in
     *) echo -e "\033[31未知架构: $architecture,请手动安装\033[0m"; exit ;;
 esac
 cd ${workdir}
-unzip -q *.zip
+unzip -o *.zip   # 自动覆盖（-o）
 chmod 755 ${workdir}/xray
 rm -f *.zip
 id_s=$(${workdir}/xray uuid)
@@ -112,8 +112,7 @@ private_old=$(echo "$xray_x25519" | grep "PrivateKey:" | cut -d ' ' -f 2-)
 public_old=$(echo "$xray_x25519" | grep "Password:" | cut -d ' ' -f 2-)
 mkdir -p ${workdir}/socket
 
-# ---------- 生成配置 ----------
-# outbounds 双栈
+# ---------- 生成配置（关键：保留 domainStrategy: IPOnDemand） ----------
 outbounds_json='[
     {
         "protocol": "freedom",
@@ -129,8 +128,8 @@ outbounds_json='[
     }
 ]'
 
-# routing：无 domainStrategy，直接根据 IP 匹配
 routing_json='{
+    "domainStrategy": "IPOnDemand",
     "rules": [
         { "type": "field", "outboundTag": "direct-ipv6", "ip": ["2000::/3", "::/0"] },
         { "type": "field", "outboundTag": "direct-ipv4", "ip": ["0.0.0.0/0"] }
@@ -188,6 +187,7 @@ cat << EOF > ${workdir}/old_config.json
 }
 EOF
 
+# 显示出口信息
 echo ""
 echo -e "\e[32m出口IP配置信息:\e[0m"
 [ -n "$ipv4_outbound" ] && echo "  IPv4出口: $ipv4_outbound"
@@ -204,7 +204,7 @@ fi
 echo "#!/bin/bash" > ${workdir}/xrayinit
 chmod 755 ${workdir}/xrayinit
 wget -q -P ${workdir} https://github.com/oldfriendme/REALITY-sni-filter/releases/download/v0.2/autobuild.zip
-unzip -q autobuild.zip
+unzip -o autobuild.zip   # 自动覆盖
 rm -f autobuild.zip
 case $architecture in
     x86_64)  mv sni-filter-amd64 sni-filter ;;
@@ -234,11 +234,12 @@ echo "setsid ${workdir}/xray -c ${workdir}/sni_config.json &" >> ${workdir}/xray
 echo "on" > ${workdir}/statusfilter
 echo "while true; do sleep 3600; done" >> ${workdir}/xrayinit
 
-# ---------- 其他快捷命令 ----------
+# ---------- 快捷命令 ----------
 echo -n $id_s > ${workdir}/oldf_uuid.json
 realip=$(wget -q -O - "https://www.cloudflare.com/cdn-cgi/trace" | grep "ip=" | cut -d '=' -f 2)
 [ ${#realip} -gt 16 ] && realip=[$realip]
 
+# uuid更新脚本
 cat << 'CHAGUUID' > ${workdir}/chaguuid
 #!/bin/bash
 workdir="/var/xray"
@@ -251,7 +252,8 @@ echo "uuid已更新，新uuid为: $newuuid"
 CHAGUUID
 chmod 755 ${workdir}/chaguuid
 
-cat << 'EOF' > ${workdir}/delxray
+# 卸载脚本
+cat << 'DEL' > ${workdir}/delxray
 #!/bin/bash
 systemctl stop xray_service
 systemctl disable xray_service
@@ -260,7 +262,7 @@ deluser xrayuser 2>/dev/null
 rm -f /usr/bin/xray.* /etc/systemd/system/xray_service.service
 rm -rf /var/xray
 echo "已卸载"
-EOF
+DEL
 chmod 755 ${workdir}/delxray
 
 # 快捷链接

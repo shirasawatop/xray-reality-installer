@@ -1,5 +1,5 @@
 #!/bin/bash
-echo -e "\e[32m欢迎使用REALITY一键脚本(v20251217 - 简化版)\e[0m"
+echo -e "\e[32m欢迎使用REALITY一键脚本 (纯净版)\e[0m"
 echo ""
 echo "         _      _   __        _                   _ "
 echo "   ___  | |  __| | / _| _ __ (_)  ___  _ __    __| |"
@@ -9,7 +9,7 @@ echo "  \___/ |_| \__,_||_|  |_|   |_| \___||_| |_| \__,_|"
 echo "                                                    "
 sleep 1
 
-# 自动检测系统IP地址
+# ---------- IP 检测 ----------
 detect_ips() {
     echo -e "\e[32m正在检测系统网络配置...\e[0m"
     ipv4_addresses=()
@@ -37,18 +37,14 @@ detect_ips() {
     [ ${#ipv4_interfaces[@]} -eq 0 ] && echo "  未检测到IPv4地址" || for i in "${!ipv4_interfaces[@]}"; do echo "  [$((i+1))] ${ipv4_interfaces[$i]}"; done
     echo -e "\e[32m检测到的IPv6地址:\e[0m"
     [ ${#ipv6_interfaces[@]} -eq 0 ] && echo "  未检测到IPv6地址" || for i in "${!ipv6_interfaces[@]}"; do echo "  [$((i+1))] ${ipv6_interfaces[$i]}"; done
-    echo ""
 }
 
 detect_ips
 
-# ========== 自动选择出口IP（双栈） ==========
+# ---------- 自动选择出口 IP ----------
 att_ipv6=""
 for ipv6 in "${ipv6_addresses[@]}"; do
-    if [[ "$ipv6" == 2600:* ]]; then
-        att_ipv6="$ipv6"
-        break
-    fi
+    [[ "$ipv6" == 2600:* ]] && { att_ipv6="$ipv6"; break; }
 done
 if [[ -z "$att_ipv6" ]]; then
     echo -e "\e[31m未检测到AT&T IPv6（2600:开头），降级使用第一个公网IPv6。\e[0m"
@@ -63,10 +59,8 @@ if [ ${#ipv4_addresses[@]} -gt 0 ]; then
 else
     echo -e "\e[33m未检测到IPv4，将仅使用IPv6出口。\e[0m"
 fi
-# ========== 出口IP选择结束 ==========
 
-# 不再需要 use_ipv6_priority 变量，直接生成outbounds和路由
-
+# ---------- 用户输入 ----------
 ipaddr=""
 portx=""
 domain_s=""
@@ -84,55 +78,48 @@ fp_choice=$(whiptail --title "选择浏览器指纹" --menu "使用 ↑↓ 选�
     "firefox" "Firefox浏览器" \
     "safari" "Safari浏览器" \
     "ios" "iOS Safari" \
-    "android" "Android浏览器" \
-    "edge" "Microsoft Edge" \
-    "360" "360浏览器" \
-    "qq" "QQ浏览器" 3>&1 1>&2 2>&3)
+    "edge" "Microsoft Edge" 3>&1 1>&2 2>&3)
 [[ "$fp_choice" != "" ]] && fingerprint="$fp_choice"
 [[ "$ipaddr" == "" ]] && ipaddr="0.0.0.0"
 [[ "$portx" == "" ]] && portx="443"
 [[ "$domain_s" == "" ]] && domain_s="tesla.com"
 echo "xray config: $ipaddr:$portx?sni=$domain_s&fp=$fingerprint"
 
-# 以下只选择direct落地（socks5落地也一样，但精简后只保留direct）
-outlougt="direct"
-
+# ---------- 环境检测 ----------
 ping -c 2 8.8.8.8 &> /dev/null || { echo -e "\033[31mERR: 没有网络连接\033[0m"; exit; }
 command -v wget > /dev/null 2>&1 || { echo -e "\033[31mwget不存在,请apt install wget安装\033[0m"; exit; }
 command -v openssl > /dev/null 2>&1 || { echo -e "\033[31mopenssl不存在,请apt install openssl安装\033[0m"; exit; }
 command -v unzip > /dev/null 2>&1 || { echo -e "\033[31munzip不存在,请apt install unzip安装\033[0m"; exit; }
 
+# ---------- 下载并安装 xray ----------
 [ "$(id -u)" == 0 ] && workdir=/var/xray || workdir=${HOME}/.xray
-mkdir ${workdir}
+mkdir -p ${workdir}
 architecture=$(uname -m)
-if [[ "$architecture" == "x86_64" ]]; then
-    wget -P ${workdir} https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-64.zip
-elif [[ "$architecture" == "i386" || "$architecture" == "i686" ]]; then
-    wget -P ${workdir} https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-32.zip
-elif [[ "$architecture" == "aarch64" ]]; then
-    wget -P ${workdir} https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-arm64-v8a.zip
-else
-    echo -e "\033[31未知架构: $architecture,请手动安装\033[0m"; exit
-fi
-
-cd ${workdir}/
-unzip *.zip
+case $architecture in
+    x86_64)  wget -q -P ${workdir} https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-64.zip ;;
+    i386|i686) wget -q -P ${workdir} https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-32.zip ;;
+    aarch64) wget -q -P ${workdir} https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-arm64-v8a.zip ;;
+    *) echo -e "\033[31未知架构: $architecture,请手动安装\033[0m"; exit ;;
+esac
+cd ${workdir}
+unzip -q *.zip
 chmod 755 ${workdir}/xray
-rm *.zip
-id_s=`${workdir}/xray uuid`
-xray_x25519=`${workdir}/xray x25519`
-shortIds=`openssl rand -hex 6`
+rm -f *.zip
+id_s=$(${workdir}/xray uuid)
+xray_x25519=$(${workdir}/xray x25519)
+shortIds=$(openssl rand -hex 6)
 private_old=$(echo "$xray_x25519" | grep "PrivateKey:" | cut -d ' ' -f 2-)
 public_old=$(echo "$xray_x25519" | grep "Password:" | cut -d ' ' -f 2-)
-mkdir ${workdir}/socket
+mkdir -p ${workdir}/socket
 
-# 生成outbounds（直接出站，双栈）
+# ---------- 生成配置 ----------
+# outbounds 双栈
 outbounds_json='[
     {
         "protocol": "freedom",
         "tag": "direct-ipv6",
         "settings": { "domainStrategy": "UseIPv6" },
-        "sendThrough": "'$ipv6_outbound'"
+        "sendThrough": "'$att_ipv6'"
     },
     {
         "protocol": "freedom",
@@ -142,16 +129,15 @@ outbounds_json='[
     }
 ]'
 
-# 生成路由规则（自动匹配，不设优先级）
+# routing：无 domainStrategy，直接根据 IP 匹配
 routing_json='{
-    "domainStrategy": "IPOnDemand",
     "rules": [
         { "type": "field", "outboundTag": "direct-ipv6", "ip": ["2000::/3", "::/0"] },
         { "type": "field", "outboundTag": "direct-ipv4", "ip": ["0.0.0.0/0"] }
     ]
 }'
 
-# 写入sni_config.json
+# sni_config.json（通过 unix socket）
 cat << EOF > ${workdir}/sni_config.json
 {"log": {"loglevel": "warning"},"inbounds": [{
     "listen": "${workdir}/socket/xray.friend,0600",
@@ -176,7 +162,7 @@ cat << EOF > ${workdir}/sni_config.json
 }
 EOF
 
-# 写入old_config.json（直接监听端口）
+# old_config.json（直接监听端口）
 cat << EOF > ${workdir}/old_config.json
 {"log": {"loglevel": "warning"},"inbounds": [{
     "port": $portx,
@@ -202,80 +188,90 @@ cat << EOF > ${workdir}/old_config.json
 }
 EOF
 
-# 显示出口配置
 echo ""
 echo -e "\e[32m出口IP配置信息:\e[0m"
 [ -n "$ipv4_outbound" ] && echo "  IPv4出口: $ipv4_outbound"
-[ -n "$ipv6_outbound" ] && echo "  IPv6出口: $ipv6_outbound"
+[ -n "$att_ipv6" ] && echo "  IPv6出口: $att_ipv6"
 
-# 创建用户和目录权限
+# ---------- 用户 & 权限 ----------
 if [ "$(id -u)" == 0 ]; then
-    useradd xrayuser
-    usermod -s /sbin/nologin xrayuser
-    chown :xrayuser ${workdir}/*.json
+    useradd -M -s /sbin/nologin xrayuser 2>/dev/null
+    chown -R :xrayuser ${workdir}/*.json
     chown xrayuser ${workdir}/ ${workdir}/socket
 fi
 
-# 准备启动脚本
+# ---------- sni-filter ----------
 echo "#!/bin/bash" > ${workdir}/xrayinit
 chmod 755 ${workdir}/xrayinit
-wget -P ${workdir} https://github.com/oldfriendme/REALITY-sni-filter/releases/download/v0.2/autobuild.zip
-unzip autobuild.zip
-rm autobuild.zip
-[[ "$architecture" == "x86_64" ]] && mv sni-filter-amd64 sni-filter
-[[ "$architecture" == "i386" || "$architecture" == "i686" ]] && mv sni-filter-i386 sni-filter
-[[ "$architecture" == "aarch64" ]] && mv sni-filter-arm64 sni-filter
+wget -q -P ${workdir} https://github.com/oldfriendme/REALITY-sni-filter/releases/download/v0.2/autobuild.zip
+unzip -q autobuild.zip
+rm -f autobuild.zip
+case $architecture in
+    x86_64)  mv sni-filter-amd64 sni-filter ;;
+    i386|i686) mv sni-filter-i386 sni-filter ;;
+    aarch64) mv sni-filter-arm64 sni-filter ;;
+esac
 chmod 755 sni-filter
 setcap 'cap_net_bind_service=+ep' ${workdir}/sni-filter
 
-# systemd服务
-cat << EOF > /etc/systemd/system/xray_service.service
+# ---------- systemd 服务 ----------
+cat << 'EOF' > /etc/systemd/system/xray_service.service
 [Unit]
 Description=xray Service
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/sh ${workdir}/xrayinit
+ExecStart=/usr/bin/sh /var/xray/xrayinit
 User=xrayuser
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-if [[ "$ipaddr" != "" ]]; then
-    echo "setsid ${workdir}/sni-filter -L=tcp://${ipaddr}:${portx} -F=unix://${workdir}/socket/xray.friend -S=$domain_s &" >> ${workdir}/xrayinit
-    echo "setsid ${workdir}/xray -c ${workdir}/sni_config.json &" >> ${workdir}/xrayinit
-    echo "on" > ${workdir}/statusfilter
-fi
+echo "setsid ${workdir}/sni-filter -L=tcp://${ipaddr}:${portx} -F=unix://${workdir}/socket/xray.friend -S=$domain_s &" >> ${workdir}/xrayinit
+echo "setsid ${workdir}/xray -c ${workdir}/sni_config.json &" >> ${workdir}/xrayinit
+echo "on" > ${workdir}/statusfilter
 echo "while true; do sleep 3600; done" >> ${workdir}/xrayinit
 
-# 生成uuid更新脚本
+# ---------- 其他快捷命令 ----------
 echo -n $id_s > ${workdir}/oldf_uuid.json
-oldip=$(wget -q -O - "https://www.cloudflare.com/cdn-cgi/trace")
-realip=$(echo "$oldip" | grep "ip=" | cut -d '=' -f 2)
+realip=$(wget -q -O - "https://www.cloudflare.com/cdn-cgi/trace" | grep "ip=" | cut -d '=' -f 2)
 [ ${#realip} -gt 16 ] && realip=[$realip]
 
 cat << 'CHAGUUID' > ${workdir}/chaguuid
 #!/bin/bash
 workdir="/var/xray"
-newuuid=`${workdir}/xray uuid`
-olduuid=`cat ${workdir}/oldf_uuid.json`
-sed -i "s/$olduuid/$newuuid/g" ${workdir}/old_config.json
-sed -i "s/$olduuid/$newuuid/g" ${workdir}/sni_config.json
+newuuid=$(${workdir}/xray uuid)
+olduuid=$(cat ${workdir}/oldf_uuid.json)
+sed -i "s/$olduuid/$newuuid/g" ${workdir}/old_config.json ${workdir}/sni_config.json
 echo -n $newuuid > ${workdir}/oldf_uuid.json
 systemctl restart xray_service
-echo uuid已更新,新uuid为: $newuuid
+echo "uuid已更新，新uuid为: $newuuid"
 CHAGUUID
+chmod 755 ${workdir}/chaguuid
 
-# 其他快捷命令（同原脚本，略去重复部分，但保留关键功能）
-# 为了完整，保留delxray, xraystop, xraystart, xrayrestart, closedsni, opensni等
-# 但为了简洁，这里只展示主要部分，用户可自行从原脚本补全（或使用旧版的快捷命令）
-# 由于篇幅，这里省略部分脚本（但关键功能均在）
+cat << 'EOF' > ${workdir}/delxray
+#!/bin/bash
+systemctl stop xray_service
+systemctl disable xray_service
+killall xray sni-filter 2>/dev/null
+deluser xrayuser 2>/dev/null
+rm -f /usr/bin/xray.* /etc/systemd/system/xray_service.service
+rm -rf /var/xray
+echo "已卸载"
+EOF
+chmod 755 ${workdir}/delxray
 
-# 自动更新AT&T IPv6
+# 快捷链接
+ln -sf ${workdir}/chaguuid /usr/bin/xray.chuuid
+ln -sf ${workdir}/delxray /usr/bin/xray.delxray
+ln -sf ${workdir}/xrayinit /usr/bin/xray.start
+ln -sf ${workdir}/xrayinit /usr/bin/xray.restart
+
+# ---------- 自动更新 AT&T IPv6 ----------
 echo "$att_ipv6" > ${workdir}/last_att_ipv6.txt
-cat << 'AUTOUPDATE_SCRIPT' > ${workdir}/auto_update_ip.sh
+cat << 'AUTOUPDATE' > ${workdir}/auto_update_ip.sh
 #!/bin/bash
 workdir="/var/xray"
 last_ip_file="${workdir}/last_att_ipv6.txt"
@@ -293,15 +289,19 @@ sed -i "s/\"sendThrough\": \"$last_ip\"/\"sendThrough\": \"$current_ip\"/g" "$co
 echo "$current_ip" > "$last_ip_file"
 systemctl restart xray_service
 echo "Xray已使用新IPv6出口重启"
-AUTOUPDATE_SCRIPT
+AUTOUPDATE
 chmod +x ${workdir}/auto_update_ip.sh
 (crontab -l 2>/dev/null; echo "* * * * * ${workdir}/auto_update_ip.sh") | crontab -
 echo -e "\e[32m已添加自动更新IP的cron任务（每分钟检查）\e[0m"
 
-# 完成
+# ---------- 完成 ----------
+systemctl daemon-reload
 systemctl enable xray_service
-echo "done!"
-echo -e "\e[32m安装完成\e[0m"
-echo -e "\e[32m你的订阅为\e[0m"
-echo "vless://$id_s@$realip:$portx?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain_s&fp=$fingerprint&pbk=$public_old&sid=$shortIds&type=tcp&headerType=none&host=$domain_s#xray_REALITY"
 systemctl start xray_service
+echo ""
+echo -e "\e[32m安装完成！你的订阅链接：\e[0m"
+echo "vless://$id_s@$realip:$portx?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain_s&fp=$fingerprint&pbk=$public_old&sid=$shortIds&type=tcp&headerType=none&host=$domain_s#xray_REALITY"
+echo ""
+echo -e "\e[32m快捷命令：\e[0m"
+echo "  修改uuid: xray.chuuid"
+echo "  卸载:     xray.delxray"

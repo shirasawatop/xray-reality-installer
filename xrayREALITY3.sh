@@ -601,10 +601,22 @@ fi
 # 记录UUID
 echo -n $id_s > ${workdir}/oldf_uuid.json
 
-# 获取真实公网IP
-oldip=$(wget -q -O - "https://www.cloudflare.com/cdn-cgi/trace")
-realip=$(echo "$oldip" | grep "ip=" | cut -d '=' -f 2)
-[ ${#realip} -gt 16 ] && realip="[$realip]"
+# 获取真实公网IP（IPv4 与 IPv6）
+realip4=""
+realip6=""
+# 尝试获取IPv4
+oldip4=$(wget -q4 -O - "https://www.cloudflare.com/cdn-cgi/trace")
+if [ -n "$oldip4" ]; then
+    realip4=$(echo "$oldip4" | grep "ip=" | cut -d '=' -f 2)
+fi
+# 尝试获取IPv6
+oldip6=$(wget -q6 -O - "https://www.cloudflare.com/cdn-cgi/trace")
+if [ -n "$oldip6" ]; then
+    realip6=$(echo "$oldip6" | grep "ip=" | cut -d '=' -f 2)
+fi
+
+# 订阅链接基础参数（已移除多余的 &flow=）
+sub_base="encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain_s&fp=$fingerprint&pbk=$public_old&sid=$shortIds&type=tcp&headerType=none&host=$domain_s#xray_REALITY"
 
 # 管理脚本：更换UUID
 cat << EOF > ${workdir}/chaguuid
@@ -617,12 +629,14 @@ killall xray > /dev/null 2>&1
 killall sni-filter > /dev/null 2>&1
 echo -n \$newuuid > ${workdir}/oldf_uuid.json
 systemctl restart xray_service
-olddy="$realip:$portx?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain_s&fp=$fingerprint&pbk=$public_old&sid=$shortIds&type=tcp&headerType=none&host=$domain_s&flow=$old_flow#xray_REALITY"
 echo uuid已更新,新uuid为: \$newuuid
-echo xray新订阅为: vless://\$newuuid@\$olddy
+# IPv4 链接
+[ -n "$realip4" ] && echo "xray IPv4订阅: vless://\$newuuid@$realip4:$portx?$sub_base"
+# IPv6 链接
+[ -n "$realip6" ] && echo "xray IPv6订阅: vless://\$newuuid@[$realip6]:$portx?$sub_base"
 EOF
 
-# 移除 closedsni/opensni，只保留其他管理工具
+# 简化管理工具
 echo "echo -e \"\033[32mbug已解决\033[0m\"" > ${workdir}/xraynobug
 
 cat << EOF > ${workdir}/delxray
@@ -668,7 +682,7 @@ chmod 640 ${workdir}/*.json
 chmod 755 ${workdir}/delxray ${workdir}/chaguuid ${workdir}/ddns_check.sh 2>/dev/null || true
 chmod 755 ${workdir}/xray*
 
-# 软链接（不再创建 csni/osni）
+# 软链接
 ln -sf ${workdir}/chaguuid /usr/bin/xray.chuuid
 ln -sf ${workdir}/delxray /usr/bin/xray.delxray
 ln -sf ${workdir}/xraystop /usr/bin/xray.stop
@@ -678,11 +692,30 @@ ln -sf ${workdir}/xraynobug /usr/bin/xray.debug
 ln -sf ${workdir}/xrayhelp /usr/bin/xray.help
 
 systemctl enable xray_service
-echo "done!"
-echo -e "\e[32m安装完成\e[0m"
-echo -e "\e[32m你的订阅为\e[0m"
+
+# 安装完成提示与订阅
 echo ""
-echo -e "\e[32mvless://$id_s@$realip:$portx?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain_s&fp=$fingerprint&pbk=$public_old&sid=$shortIds&type=tcp&headerType=none&host=$domain_s&flow=$old_flow#xray_REALITY\e[0m"
+echo -e "\e[32m==================== 安装完成 ====================\e[0m"
+echo ""
+if [ -n "$realip4" ]; then
+    echo -e "\e[32m[IPv4] vless://$id_s@$realip4:$portx?$sub_base\e[0m"
+fi
+if [ -n "$realip6" ]; then
+    echo -e "\e[32m[IPv6] vless://$id_s@[$realip6]:$portx?$sub_base\e[0m"
+fi
+if [ -z "$realip4" ] && [ -z "$realip6" ]; then
+    echo -e "\033[31m未能获取公网IP，请手动检查网络！\033[0m"
+fi
+echo ""
+echo -e "\e[33m请确保防火墙已开放 TCP 端口 $portx\e[0m"
+echo "若使用云服务器，请检查安全组/防火墙规则。"
+echo "如需手动开放（iptables）："
+echo "  iptables -I INPUT -p tcp --dport $portx -j ACCEPT"
+echo "  ip6tables -I INPUT -p tcp --dport $portx -j ACCEPT"
 echo ""
 ${workdir}/xrayhelp
 systemctl start xray_service
+sleep 2
+echo ""
+echo -e "\e[32m服务已启动，可通过以下命令查看状态：\e[0m"
+echo "  systemctl status xray_service"

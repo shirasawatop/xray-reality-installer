@@ -350,36 +350,36 @@ generate_routing() {
     local routing_json=''
     if [[ -n "$ipv6_outbound" ]] && [[ -n "$ipv4_outbound" ]]; then
         if [[ "$use_ipv6_priority" == "yes" ]]; then
-            routing_json='{
+            routing_json='
     "routing": {
         "domainStrategy": "IPOnDemand",
         "rules": [
             {"type": "field", "outboundTag": "direct-ipv6", "ip": ["2000::/3", "::/0"]},
             {"type": "field", "outboundTag": "direct-ipv4", "ip": ["0.0.0.0/0"]}
         ]
-    }}'
+    }'
         else
-            routing_json='{
+            routing_json='
     "routing": {
         "domainStrategy": "IPOnDemand",
         "rules": [
             {"type": "field", "outboundTag": "direct-ipv4", "ip": ["0.0.0.0/0"]},
             {"type": "field", "outboundTag": "direct-ipv6", "ip": ["2000::/3", "::/0"]}
         ]
-    }}'
+    }'
         fi
     elif [[ -n "$ipv6_outbound" ]]; then
-        routing_json='{
+        routing_json='
     "routing": {
         "domainStrategy": "IPIfNonMatch",
         "rules": [{"type": "field", "outboundTag": "direct-ipv6", "network": "tcp,udp"}]
-    }}'
+    }'
     elif [[ -n "$ipv4_outbound" ]]; then
-        routing_json='{
+        routing_json='
     "routing": {
         "domainStrategy": "IPIfNonMatch",
         "rules": [{"type": "field", "outboundTag": "direct-ipv4", "network": "tcp,udp"}]
-    }}'
+    }'
     fi
     echo "$routing_json"
 }

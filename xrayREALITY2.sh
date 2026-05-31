@@ -219,10 +219,7 @@ fp_choice=$(whiptail --title "选择浏览器指纹" --menu \
     "firefox" "Firefox浏览器" \
     "safari" "Safari浏览器" \
     "ios" "iOS Safari" \
-    "android" "Android浏览器" \
-    "edge" "Microsoft Edge" \
-    "360" "360浏览器" \
-    "qq" "QQ浏览器" 3>&1 1>&2 2>&3)
+    "edge" "Microsoft Edge" 3>&1 1>&2 2>&3)
 
 if [[ "$fp_choice" != "" ]]; then
 fingerprint="$fp_choice"

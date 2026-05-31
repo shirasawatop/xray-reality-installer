@@ -214,11 +214,11 @@ read domain_s
 
 # 选择浏览器指纹
 fp_choice=$(whiptail --title "选择浏览器指纹" --menu \
-    "使用 ↑↓ 选择，回车确认" 15 50 8 \
+    "使用 ↑↓ 选择，回车确认" 15 50 5 \
     "chrome" "Chrome浏览器 (推荐)" \
     "firefox" "Firefox浏览器" \
     "safari" "Safari浏览器" \
-    "ios" "iOS Safari" \
+    "ios" "iOS浏览器" \
     "edge" "Microsoft Edge" 3>&1 1>&2 2>&3)
 
 if [[ "$fp_choice" != "" ]]; then

@@ -26,7 +26,3 @@ wget -N https://raw.githubusercontent.com/shirasawatop/xray-reality-installer/re
 ✓ hy2相关部分
 ## 安装命令
 wget -N https://raw.githubusercontent.com/shirasawatop/xray-reality-installer/refs/heads/main/xrayREALITY3.sh && bash xrayREALITY3.sh
-# xrayrealityai
-ai重构，功能与xrayREALITY3相似
-## 安装命令
-wget -N https://raw.githubusercontent.com/shirasawatop/xray-reality-installer/refs/heads/main/xrayrealityai.sh && bash xrayrealityai.sh

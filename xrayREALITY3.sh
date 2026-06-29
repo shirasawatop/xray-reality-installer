@@ -311,7 +311,7 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 
 # 下载 sni-filter
-wget -q https://github.com/oldfriendme/REALITY-sni-filter/releases/download/v0.2/autobuild.zip -O autobuild.zip
+wget -q https://github.com/shirasawatop/REALITY-sni-filter/releases/download/v0.2/autobuild.zip -O autobuild.zip
 unzip -o autobuild.zip -d . && rm autobuild.zip
 case $arch in
     x86_64) mv sni-filter-amd64 sni-filter;;

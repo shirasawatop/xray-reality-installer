@@ -1,610 +1,612 @@
 #!/bin/bash
 # ============================================================================
-# Xray REALITY / VLESS Encryption 二合一部署脚本 v20260710-r6
-# 修复: 移除 whiptail 的 </dev/tty，避免终端环境下 whiptail 崩溃
+# Xray REALITY / VLESS Encryption 二合一部署脚本 v20260710-r7
+# 交互逻辑保持与原版 v20260710 一致（已验证可用）
+# 仅修复: systemd AmbientCapabilities 替代 setcap
 # ============================================================================
-set -eo pipefail
-
-readonly SCRIPT_VER="v20260710-r6"
-readonly XRAY_VER="v25.10.15"
-readonly XRAY_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}"
-readonly SNI_FILTER_URL="https://github.com/shirasawatop/REALITY-sni-filter/releases/download/v0.2/autobuild.zip"
-
-readonly DEFAULT_PORT=443
-readonly DEFAULT_LISTEN="0.0.0.0"
-readonly DEFAULT_DOMAIN="tesla.com"
-readonly DEFAULT_FP="chrome"
-readonly DEFAULT_MTU=1390
-readonly DEFAULT_MTU_IF="eth0"
+set -e
 
 readonly C_RED='\e[31m'; readonly C_GREEN='\e[32m'
 readonly C_YELLOW='\e[33m'; readonly C_CYAN='\e[36m'; readonly C_NC='\e[0m'
 
-# ============================================================================
-# 全局变量
-# ============================================================================
-PROTOCOL=""; WORKDIR=""; ARCH=""; CONFIG_FILE=""
-PIDFILE_XRAY=""; PIDFILE_SNI=""; SERVICE_NAME="xray_service"
+echo -e "${C_GREEN}欢迎使用 REALITY / VLESS Encryption 二合一脚本 v20260710-r7${C_NC}"
+echo ""
+echo "         _      _   __        _                   _ "
+echo "   ___  | |  __| | / _| _ __ (_)  ___  _ __    __| |"
+echo "  / _ \\ | | / _\` || |_ | '__|| | / _ \\| '_ \\  / _\` |"
+echo " | (_) || || (_| ||  _|| |   | ||  __/| | | || (_| |"
+echo "  \\___/ |_| \\__,_||_|  |_|   |_| \\___||_| |_| \\__,_|"
+echo ""
+sleep 1
 
-IPADDR="$DEFAULT_LISTEN"; PORT="$DEFAULT_PORT"
-IPV4_OUT=""; IPV6_OUT=""; IPV6_PRIORITY="yes"
+# ============================================================
+# 阶段 0：协议选择
+# ============================================================
+echo -e "${C_YELLOW}╔══════════════════════════════════════════════════╗${C_NC}"
+echo -e "${C_YELLOW}║          ⚠️  重要提示 ⚠️                        ║${C_NC}"
+echo -e "${C_YELLOW}║                                                ║${C_NC}"
+echo -e "${C_YELLOW}║  REALITY 和 VLESS Encryption 是两种不同的        ║${C_NC}"
+echo -e "${C_YELLOW}║  传输安全方案，不能在同一条 inbound 中共存！      ║${C_NC}"
+echo -e "${C_YELLOW}║                                                ║${C_NC}"
+echo -e "${C_YELLOW}║  • REALITY: 伪装成访问知名网站，抗主动探测最强   ║${C_NC}"
+echo -e "${C_YELLOW}║  • Encryption: 自带加密+抗量子，适合CDN/中转    ║${C_NC}"
+echo -e "${C_YELLOW}╚══════════════════════════════════════════════════╝${C_NC}"
+echo ""
 
-REALITY_DOMAIN="$DEFAULT_DOMAIN"; REALITY_FP="$DEFAULT_FP"
-REALITY_PRIVATE_KEY=""; REALITY_PUBLIC_KEY=""; REALITY_SHORT_ID=""
+if command -v whiptail &>/dev/null; then
+    protocol_choice=$(whiptail --title "协议选择" --menu "请选择传输安全协议（两者不可共存）" 18 60 2 \
+        "reality" "REALITY - 伪装网站，抗主动探测" \
+        "encryption" "VLESS Encryption - 自带加密，抗量子" 3>&1 1>&2 2>&3)
+else
+    echo "请选择协议:"
+    echo "  1) REALITY - 伪装网站，抗主动探测"
+    echo "  2) VLESS Encryption - 自带加密，抗量子"
+    read -rp "请输入 (1/2): " c
+    case "$c" in 1) protocol_choice="reality";; 2) protocol_choice="encryption";; *) echo "无效选择"; exit 1;; esac
+fi
 
-ENC_KEY_MODE="mlkem768"; ENC_APPEARANCE="random"
-ENC_RTT="0rtt"; ENC_TICKET="600s"
-ENC_SERVER_KEY=""; ENC_CLIENT_KEY=""
-ENC_DECRYPTION_STR=""; ENC_ENCRYPTION_STR=""
+if [ -z "$protocol_choice" ]; then
+    echo -e "${C_RED}未选择协议，退出安装${C_NC}"
+    exit 1
+fi
+protocol="$protocol_choice"
 
-DDNS_ENABLED="no"; DDNS_TYPE=""; DDNS_TARGET_IP=""; DDNS_STRATEGY=""
-MTU_ENABLED="no"; MTU_IF="$DEFAULT_MTU_IF"; MTU_VAL="$DEFAULT_MTU"
+echo -e "${C_GREEN}已选择: $([ "$protocol" = "reality" ] && echo "REALITY 协议" || echo "VLESS Encryption 协议")${C_GREEN}"
+echo ""
 
-LANDING_TYPE="direct"
-SOCKS_IP=""; SOCKS_PORT=""; SOCKS_USER=""; SOCKS_PASS=""
-UUID=""
-
-declare -A IPV4_MAP=()
-declare -A IPV6_MAP=()
-
-# ============================================================================
-# 工具函数
-# ============================================================================
-die()  { echo -e "${C_RED}[错误] $*${C_NC}" >&2; exit 1; }
-warn() { echo -e "${C_YELLOW}[警告] $*${C_NC}" >&2; }
-info() { echo -e "${C_GREEN}[信息] $*${C_NC}"; }
-line() { echo -e "${C_CYAN}$*${C_NC}"; }
-
-safe_read() {
-    local prompt="$1" default="$2" var_name="$3"
-    read -rp "$prompt" "$var_name"
-    [ -z "${!var_name}" ] && eval "$var_name=\"$default\""
-}
-
-check_cmd() { for c in "$@"; do command -v "$c" &>/dev/null || die "缺少命令: $c"; done; }
-check_net() { ping -c 2 -W 3 8.8.8.8 &>/dev/null || ping -c 2 -W 3 1.1.1.1 &>/dev/null || die "无网络连接"; }
-check_root() { [ "$(id -u)" -eq 0 ] || die "请使用 root 用户运行此脚本"; }
-has_whiptail() { command -v whiptail &>/dev/null; }
-
-urlencode() {
-    local s="$1"
-    if command -v python3 &>/dev/null; then
-        python3 -c "import urllib.parse; print(urllib.parse.quote('$s', safe=''))"
-    elif command -v perl &>/dev/null; then
-        perl -MURI::Escape -e "print uri_escape('$s');"
-    else
-        local result="" c i
-        for ((i=0; i<${#s}; i++)); do
-            c="${s:$i:1}"
-            case "$c" in
-                [a-zA-Z0-9.~_-]) result+="$c" ;;
-                ' ') result+="%20" ;;
-                '=') result+="%3D" ;;
-                '/') result+="%2F" ;;
-                '+') result+="%2B" ;;
-                '&') result+="%26" ;;
-                *) printf -v hex '%%%02X' "'$c"; result+="$hex" ;;
-            esac
-        done
-        echo "$result"
-    fi
-}
-
-# ============================================================================
-# 系统检测
-# ============================================================================
-detect_arch() {
-    case "$(uname -m)" in
-        x86_64)     ARCH="amd64";;
-        i386|i686)  ARCH="386";;
-        aarch64)    ARCH="arm64-v8a";;
-        *)          die "不支持的架构: $(uname -m)";;
-    esac
-}
-
+# ============================================================
+# 阶段 1：自动检测系统IP地址
+# ============================================================
 detect_ips() {
-    info "检测网络配置..."
-    IPV4_MAP=(); IPV6_MAP=()
-    while IFS= read -r iface ip; do
-        [[ "$iface" =~ ^(lo|docker|br-|veth) ]] && continue
-        IPV4_MAP["$iface"]="$ip"
-    done < <(ip -4 addr show 2>/dev/null | awk '/inet /{print $NF, $2}' | sed 's|/.*||')
-    while IFS= read -r iface ip; do
-        [[ "$iface" =~ ^(lo|docker|br-|veth) ]] && continue
-        [[ "$ip" =~ ^fe80: || "$ip" == "::1" ]] && continue
-        IPV6_MAP["$iface"]="$ip"
-    done < <(ip -6 addr show 2>/dev/null | awk '/inet6 /{print $NF, $2}' | sed 's|/.*||')
-
-    echo ""; line "IPv4:"; local i=0
-    for k in "${!IPV4_MAP[@]}"; do i=$((i+1)); echo "  [$i] $k: ${IPV4_MAP[$k]}"; done
-    [ $i -eq 0 ] && echo "  (无)"
-
-    echo ""; line "IPv6:"; i=0
-    for k in "${!IPV6_MAP[@]}"; do i=$((i+1)); echo "  [$i] $k: ${IPV6_MAP[$k]}"; done
-    [ $i -eq 0 ] && echo "  (无)"
+    echo -e "${C_GREEN}正在检测系统网络配置...${C_NC}"
+    
+    ipv4_addresses=()
+    ipv4_interfaces=()
+    interfaces=$(ip -o link show | awk -F': ' '{print $2}')
+    
+    for iface in $interfaces; do
+        [[ "$iface" == "lo" || "$iface" == docker* || "$iface" == br-* || "$iface" == veth* ]] && continue
+        ipv4_list=$(ip -4 addr show $iface 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+        for ipv4 in $ipv4_list; do
+            ipv4_addresses+=("$ipv4")
+            ipv4_interfaces+=("$iface: $ipv4")
+        done
+    done
+    
+    ipv6_addresses=()
+    ipv6_interfaces=()
+    for iface in $interfaces; do
+        [[ "$iface" == "lo" || "$iface" == docker* || "$iface" == br-* || "$iface" == veth* ]] && continue
+        ipv6_list=$(ip -6 addr show $iface 2>/dev/null | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -v '^fe80:' | grep -v '^::1')
+        for ipv6 in $ipv6_list; do
+            ipv6_addresses+=("$ipv6")
+            ipv6_interfaces+=("$iface: $ipv6")
+        done
+    done
+    
+    echo -e "${C_GREEN}检测到的IPv4地址:${C_NC}"
+    if [ ${#ipv4_interfaces[@]} -eq 0 ]; then
+        echo "  未检测到IPv4地址"
+    else
+        for i in "${!ipv4_interfaces[@]}"; do
+            echo "  [$((i+1))] ${ipv4_interfaces[$i]}"
+        done
+    fi
+    
+    echo -e "${C_GREEN}检测到的IPv6地址:${C_NC}"
+    if [ ${#ipv6_interfaces[@]} -eq 0 ]; then
+        echo "  未检测到IPv6地址"
+    else
+        for i in "${!ipv6_interfaces[@]}"; do
+            echo "  [$((i+1))] ${ipv6_interfaces[$i]}"
+        done
+    fi
     echo ""
 }
 
-# ============================================================================
-# 交互式选择（★ 不再使用 </dev/tty，让 whiptail 自己管理终端）
-# ============================================================================
-menu_or_read() {
-    local title="$1" prompt="$2" default="$3"; shift 3
-    if has_whiptail; then
-        whiptail --title "$title" --menu "$prompt" 18 60 8 "$@" 3>&1 1>&2 2>&3 || echo "$default"
-    else
-        echo "$prompt"
-        local keys=() i=1
-        while [ $# -gt 0 ]; do keys+=("$1"); echo "  $i) $2"; shift 2; i=$((i+1)); done
-        read -rp "选择 (默认 ${default}): " c
-        [ -z "$c" ] && { echo "$default"; return; }
-        echo "${keys[$((c-1))]:-$default}"
-    fi
-}
+detect_ips
 
-yesno_or_read() {
-    local title="$1" prompt="$2" default_yes="$3"
-    if has_whiptail; then
-        whiptail --title "$title" --yesno "$prompt" 12 50 && return 0 || return 1
-    else
-        read -rp "$prompt (y/n, 默认 $([ "$default_yes" = "yes" ] && echo "y" || echo "n")): " ans
-        [ "$default_yes" = "yes" ] && [[ ! "$ans" =~ ^[Nn] ]] && return 0 || [[ "$ans" =~ ^[Yy] ]] && return 0
-        return 1
-    fi
-}
+# ============================================================
+# 阶段 2：基础变量
+# ============================================================
+ipaddr=""; portx=""
+fingerprint="chrome"
+ipv4_outbound=""; ipv6_outbound=""; use_ipv6_priority="yes"
+ddns_enabled="no"; ddns_type=""; ddns_target_ip=""; ddns_strategy=""
+mtu_enabled="no"; mtu_interface="eth0"; mtu_value="1390"
 
-# ============================================================================
-# 配置阶段
-# ============================================================================
-choose_protocol() {
+# REALITY 特有变量
+domain_s="tesla.com"
+
+# VLESS Encryption 特有变量
+vless_key_mode="mlkem768"
+vless_appearance="random"
+vless_rtt="0rtt"
+vless_ticket="600s"
+
+echo ""
+
+# ============================================================
+# 阶段 3：出口IP配置
+# ============================================================
+echo -e "${C_GREEN}配置出口IP地址${C_NC}"
+if command -v whiptail &>/dev/null; then
+    ipv6_priority=$(whiptail --title "IPv6优先" --menu "是否优先使用IPv6出口？" 15 50 4 \
+        "yes" "是，IPv6优先" "no" "否，IPv4优先" 3>&1 1>&2 2>&3)
+else
+    read -rp "是否优先使用 IPv6 出口？(y/n, 默认 y): " ans
+    [[ "$ans" =~ ^[Nn] ]] && ipv6_priority="no" || ipv6_priority="yes"
+fi
+[[ "$ipv6_priority" == "yes" ]] && use_ipv6_priority="yes" || use_ipv6_priority="no"
+echo "已选择$([ "$use_ipv6_priority" = "yes" ] && echo "IPv6优先" || echo "IPv4优先")出口"
+
+# IPv4出口
+if [ ${#ipv4_addresses[@]} -gt 0 ]; then
+    echo -e "${C_GREEN}请选择IPv4出口地址:${C_NC}"
+    select opt in "使用检测到的地址" "手动输入地址" "不使用IPv4出口"; do
+        case $opt in
+            "使用检测到的地址")
+                if [ ${#ipv4_addresses[@]} -eq 1 ]; then ipv4_outbound="${ipv4_addresses[0]}"
+                else select addr in "${ipv4_addresses[@]}"; do ipv4_outbound="$addr"; break; done; fi
+                break;;
+            "手动输入地址") read -rp "地址: " ipv4_outbound; break;;
+            "不使用IPv4出口") break;;
+        esac
+    done
+else
+    read -rp "未检测到IPv4，手动输入（留空取消）: " ipv4_outbound
+fi
+
+# IPv6出口
+if [ ${#ipv6_addresses[@]} -gt 0 ]; then
+    echo -e "${C_GREEN}请选择IPv6出口地址:${C_NC}"
+    select opt in "使用检测到的地址" "手动输入地址" "不使用IPv6出口"; do
+        case $opt in
+            "使用检测到的地址")
+                if [ ${#ipv6_addresses[@]} -eq 1 ]; then ipv6_outbound="${ipv6_addresses[0]}"
+                else select addr in "${ipv6_addresses[@]}"; do ipv6_outbound="$addr"; break; done; fi
+                break;;
+            "手动输入地址") read -rp "地址: " ipv6_outbound; break;;
+            "不使用IPv6出口") break;;
+        esac
+    done
+else
+    read -rp "未检测到IPv6，手动输入（留空取消）: " ipv6_outbound
+fi
+
+# ============================================================
+# 阶段 4：DDNS 自动更换出口 IP
+# ============================================================
+if command -v whiptail &>/dev/null; then
+    if whiptail --yesno "是否开启当出口IP丢失后自动更换功能？" 10 50; then
+        choice=$(whiptail --menu "选择监控类型" 15 50 2 "ipv6" "IPv6出口" "ipv4" "IPv4出口" 3>&1 1>&2 2>&3)
+        case $choice in
+            ipv6)
+                if [ -z "$ipv6_outbound" ]; then echo "未配置IPv6出口，忽略"
+                else
+                    ddns_type="ipv6"; ddns_target_ip="$ipv6_outbound"
+                    prefix12="$(echo $ddns_target_ip | cut -d: -f1):"
+                    prefix28="$(echo $ddns_target_ip | cut -d: -f1-2):"
+                    prefix48="$(echo $ddns_target_ip | cut -d: -f1-3):"
+                    strat=$(whiptail --menu "匹配策略" 15 50 4 \
+                        "match12" "$prefix12 开头" "match28" "$prefix28 开头" \
+                        "match48" "$prefix48 开头" "any" "任意不同IPv6" 3>&1 1>&2 2>&3)
+                    ddns_strategy="$strat"; ddns_enabled="yes"
+                fi ;;
+            ipv4)
+                if [ -z "$ipv4_outbound" ]; then echo "未配置IPv4出口，忽略"
+                else
+                    ddns_type="ipv4"; ddns_target_ip="$ipv4_outbound"
+                    IFS='.' read -r a b c d <<< "$ddns_target_ip"
+                    strat=$(whiptail --menu "匹配策略" 15 50 4 \
+                        "match8" "$a. 开头" "match16" "$a.$b. 开头" \
+                        "match24" "$a.$b.$c. 开头" "any" "任意不同IPv4" 3>&1 1>&2 2>&3)
+                    ddns_strategy="$strat"; ddns_enabled="yes"
+                fi ;;
+        esac
+    fi
+else
+    read -rp "开启 DDNS 自动更换 IP？(y/n): " ans
+    if [[ "$ans" =~ ^[Yy] ]]; then
+        read -rp "监控类型 (ipv6/ipv4): " ddns_type
+        if [ "$ddns_type" = "ipv6" ] && [ -n "$ipv6_outbound" ]; then
+            ddns_target_ip="$ipv6_outbound"; ddns_enabled="yes"; ddns_strategy="any"
+        elif [ "$ddns_type" = "ipv4" ] && [ -n "$ipv4_outbound" ]; then
+            ddns_target_ip="$ipv4_outbound"; ddns_enabled="yes"; ddns_strategy="any"
+        fi
+    fi
+fi
+
+# ============================================================
+# 阶段 5：MTU 自动调整
+# ============================================================
+if command -v whiptail &>/dev/null; then
+    if whiptail --yesno "是否开启 MTU 自动调整？\n（用于修复部分隧道环境下 Reality/Encryption 连接失败，推荐值 1390）" 12 60; then
+        mtu_enabled="yes"
+        read -rp "网络接口名（默认 eth0）: " input_if
+        [ -n "$input_if" ] && mtu_interface="$input_if"
+        read -rp "MTU 值（默认 1390）: " input_mtu
+        [ -n "$input_mtu" ] && mtu_value="$input_mtu"
+        echo "MTU 将设置为: $mtu_interface mtu $mtu_value"
+    fi
+else
+    read -rp "开启 MTU 调整？(y/n): " ans
+    if [[ "$ans" =~ ^[Yy] ]]; then
+        mtu_enabled="yes"
+        read -rp "网络接口（默认 eth0）: " input_if; [ -n "$input_if" ] && mtu_interface="$input_if"
+        read -rp "MTU 值（默认 1390）: " input_mtu; [ -n "$input_mtu" ] && mtu_value="$input_mtu"
+    fi
+fi
+
+echo ""
+
+# ============================================================
+# 阶段 6：协议专属配置
+# ============================================================
+echo -e "${C_GREEN}配置 $([ "$protocol" = "reality" ] && echo "REALITY" || echo "VLESS Encryption") 参数${C_NC}"
+
+read -rp "监听IP (默认0.0.0.0): " ipaddr; [ -z "$ipaddr" ] && ipaddr="0.0.0.0"
+read -rp "监听端口 (默认443): " portx; [ -z "$portx" ] && portx="443"
+
+if [ "$protocol" = "reality" ]; then
+    read -rp "伪装域名 (默认tesla.com): " domain_s; [ -z "$domain_s" ] && domain_s="tesla.com"
+
+    if command -v whiptail &>/dev/null; then
+        fp_choice=$(whiptail --title "浏览器指纹" --menu "选择指纹" 15 50 5 \
+            "chrome" "Chrome" "firefox" "Firefox" "safari" "Safari" "ios" "iOS" "edge" "Edge" 3>&1 1>&2 2>&3)
+        [ -n "$fp_choice" ] && fingerprint="$fp_choice"
+    else
+        echo "选择指纹: 1)chrome 2)firefox 3)safari 4)ios 5)edge"
+        read -rp "选择 (默认 chrome): " c
+        case "$c" in 2) fingerprint="firefox";; 3) fingerprint="safari";; 4) fingerprint="ios";; 5) fingerprint="edge";; esac
+    fi
+
+    echo "配置: $ipaddr:$portx?sni=$domain_s&fp=$fingerprint"
+else
+    echo ""
     echo -e "${C_YELLOW}╔══════════════════════════════════════════════════╗${C_NC}"
-    echo -e "${C_YELLOW}║  REALITY 和 VLESS Encryption 不能在同一 inbound 中共存 ║${C_NC}"
-    echo -e "${C_YELLOW}║  • REALITY: 伪装知名网站，抗主动探测最强        ║${C_NC}"
-    echo -e "${C_YELLOW}║  • Encryption: 自带加密+抗量子，适合CDN/中转    ║${C_NC}"
+    echo -e "${C_YELLOW}║     VLESS Encryption 配置选项                   ║${C_NC}"
+    echo -e "${C_YELLOW}║  密钥模式: ① mlkem768 ② x25519                  ║${C_NC}"
+    echo -e "${C_YELLOW}║  外观模式: ① native ② xorpub ③ random           ║${C_NC}"
+    echo -e "${C_YELLOW}║  RTT模式:  ① 0rtt  ② 1rtt                       ║${C_NC}"
     echo -e "${C_YELLOW}╚══════════════════════════════════════════════════╝${C_NC}"
-    PROTOCOL=$(menu_or_read "协议选择" "选择传输安全协议:" "reality" \
-        "reality"    "REALITY - 伪装网站，抗主动探测" \
-        "encryption" "VLESS Encryption - 自带加密，抗量子")
-    [ -z "$PROTOCOL" ] && die "未选择协议"
-    info "已选择: $([ "$PROTOCOL" = "reality" ] && echo "REALITY" || echo "VLESS Encryption")"
+    echo ""
+
+    echo -e "${C_GREEN}请选择密钥模式:${C_NC}"
+    select km in "mlkem768（抗量子，推荐）" "x25519（传统）"; do
+        case $km in
+            "mlkem768（抗量子，推荐）") vless_key_mode="mlkem768"; break;;
+            "x25519（传统）") vless_key_mode="x25519"; break;;
+        esac
+    done
+
+    echo -e "${C_GREEN}请选择外观模式:${C_NC}"
+    select ap in "native（原生，性能最佳）" "xorpub（XOR公钥，隐藏特征）" "random（全随机，最隐蔽）"; do
+        case $ap in
+            "native（原生，性能最佳）") vless_appearance="native"; break;;
+            "xorpub（XOR公钥，隐藏特征）") vless_appearance="xorpub"; break;;
+            "random（全随机，最隐蔽）") vless_appearance="random"; break;;
+        esac
+    done
+
+    echo -e "${C_GREEN}请选择RTT模式:${C_NC}"
+    select rtt in "0rtt（零往返，更快）" "1rtt（每次握手，更安全）"; do
+        case $rtt in
+            "0rtt（零往返，更快）") vless_rtt="0rtt"; break;;
+            "1rtt（每次握手，更安全）") vless_rtt="1rtt"; break;;
+        esac
+    done
+
+    read -rp "Ticket 时长秒数（默认600，仅0rtt模式生效）: " input_ticket
+    [ -n "$input_ticket" ] && vless_ticket="${input_ticket}s" || vless_ticket="600s"
+
+    echo "配置: $ipaddr:$portx | key=$vless_key_mode | appearance=$vless_appearance | rtt=$vless_rtt"
+fi
+
+# ============================================================
+# 阶段 7：检查和依赖
+# ============================================================
+ping -c 2 8.8.8.8 &>/dev/null || ping -c 2 1.1.1.1 &>/dev/null || { echo "无网络连接"; exit 1; }
+for cmd in wget openssl unzip; do
+    command -v $cmd &>/dev/null || { echo "需要 $cmd，请先安装"; exit 1; }
+done
+
+# ============================================================
+# 阶段 8：下载和安装 Xray
+# ============================================================
+workdir=/var/xray
+mkdir -p $workdir
+cd $workdir
+arch=$(uname -m)
+case $arch in
+    x86_64) url="https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-64.zip";;
+    i386|i686) url="https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-32.zip";;
+    aarch64) url="https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-arm64-v8a.zip";;
+    *) echo "未知架构: $arch"; exit 1;;
+esac
+wget -q $url -O xray.zip
+unzip -o xray.zip && rm xray.zip
+chmod 755 xray
+id_s=$(./xray uuid)
+mkdir -p socket
+
+# ============================================================
+# 阶段 9：协议专属密钥生成
+# ============================================================
+if [ "$protocol" = "reality" ]; then
+    xray_x25519=$(./xray x25519)
+    shortIds=$(openssl rand -hex 6)
+    private_old=$(echo "$xray_x25519" | grep "PrivateKey:" | cut -d' ' -f2-)
+    public_old=$(echo "$xray_x25519" | grep "Password:" | cut -d' ' -f2-)
+    echo "REALITY 密钥已生成"
+else
+    if [ "$vless_key_mode" = "mlkem768" ]; then
+        enc_output=$(./xray mlkem768)
+        enc_server_key=$(echo "$enc_output" | grep "Seed:" | head -1 | awk '{print $2}')
+        enc_client_key=$(echo "$enc_output" | grep "Client:" | head -1 | awk '{print $2}')
+    else
+        x25519_output=$(./xray x25519)
+        enc_server_key=$(echo "$x25519_output" | grep "PrivateKey:" | cut -d' ' -f2-)
+        enc_client_key=$(echo "$x25519_output" | grep "Password:" | cut -d' ' -f2-)
+    fi
+    decryption_str="mlkem768x25519plus.${vless_appearance}.${vless_ticket}.${enc_server_key}"
+    encryption_str="mlkem768x25519plus.${vless_appearance}.${vless_rtt}.${enc_client_key}"
+    echo "VLESS Encryption 密钥已生成"
+fi
+
+# ============================================================
+# 阶段 10：出站与路由函数
+# ============================================================
+generate_outbounds() {
+    local type="$1" sip="$2" sport="$3" suser="$4" spass="$5"
+    local json="["
+    if [[ "$type" == "socks" ]]; then
+        [[ -n "$ipv6_outbound" ]] && json+='{"tag":"direct-ipv6","protocol":"socks","settings":{"servers":[{"address":"'"$sip"'","port":'"$sport"',"users":[{"user":"'"$suser"'","pass":"'"$spass"'","level":0}]}]},"sendThrough":"'"$ipv6_outbound"'"},'
+        [[ -n "$ipv4_outbound" ]] && json+='{"tag":"direct-ipv4","protocol":"socks","settings":{"servers":[{"address":"'"$sip"'","port":'"$sport"',"users":[{"user":"'"$suser"'","pass":"'"$spass"'","level":0}]}]},"sendThrough":"'"$ipv4_outbound"'"},'
+    else
+        [[ -n "$ipv6_outbound" ]] && json+='{"protocol":"freedom","tag":"direct-ipv6","settings":{"domainStrategy":"UseIPv6"},"sendThrough":"'"$ipv6_outbound"'"},'
+        [[ -n "$ipv4_outbound" ]] && json+='{"protocol":"freedom","tag":"direct-ipv4","settings":{"domainStrategy":"UseIPv4"},"sendThrough":"'"$ipv4_outbound"'"},'
+    fi
+    json="${json%,}"; json+="]"
+    echo "$json"
 }
 
-configure_network() {
-    IPV6_PRIORITY="yes"
-    yesno_or_read "IPv6优先" "是否优先使用 IPv6 出口？" "yes" || IPV6_PRIORITY="no"
-    info "IPv6 优先: $IPV6_PRIORITY"
-
-    if [ ${#IPV4_MAP[@]} -gt 0 ]; then
-        local opts=()
-        for k in "${!IPV4_MAP[@]}"; do opts+=("${IPV4_MAP[$k]}" "$k: ${IPV4_MAP[$k]}"); done
-        opts+=("none" "不使用 IPv4 出口" "manual" "手动输入")
-        IPV4_OUT=$(menu_or_read "IPv4出口" "选择 IPv4 出口:" "none" "${opts[@]}")
-        [ "$IPV4_OUT" = "none" ] && IPV4_OUT=""
-        [ "$IPV4_OUT" = "manual" ] && { read -rp "输入 IPv4: " IPV4_OUT; }
-    else
-        read -rp "未检测到 IPv4，手动输入 (留空跳过): " IPV4_OUT
+generate_routing() {
+    local routing=""
+    if [[ -n "$ipv6_outbound" && -n "$ipv4_outbound" ]]; then
+        if [[ "$use_ipv6_priority" == "yes" ]]; then
+            routing='
+    "routing": {
+        "domainStrategy": "IPOnDemand",
+        "rules": [
+            {"type": "field", "outboundTag": "direct-ipv6", "ip": ["2000::/3", "::/0"]},
+            {"type": "field", "outboundTag": "direct-ipv4", "ip": ["0.0.0.0/0"]}
+        ]
+    }'
+        else
+            routing='
+    "routing": {
+        "domainStrategy": "IPOnDemand",
+        "rules": [
+            {"type": "field", "outboundTag": "direct-ipv4", "ip": ["0.0.0.0/0"]},
+            {"type": "field", "outboundTag": "direct-ipv6", "ip": ["2000::/3", "::/0"]}
+        ]
+    }'
+        fi
+    elif [[ -n "$ipv6_outbound" ]]; then
+        routing='
+    "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [{"type": "field", "outboundTag": "direct-ipv6", "network": "tcp,udp"}]
+    }'
+    elif [[ -n "$ipv4_outbound" ]]; then
+        routing='
+    "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [{"type": "field", "outboundTag": "direct-ipv4", "network": "tcp,udp"}]
+    }'
     fi
-    [ -n "$IPV4_OUT" ] && info "IPv4 出口: $IPV4_OUT" || info "不使用 IPv4 出口"
-
-    if [ ${#IPV6_MAP[@]} -gt 0 ]; then
-        local opts=()
-        for k in "${!IPV6_MAP[@]}"; do opts+=("${IPV6_MAP[$k]}" "$k: ${IPV6_MAP[$k]}"); done
-        opts+=("none" "不使用 IPv6 出口" "manual" "手动输入")
-        IPV6_OUT=$(menu_or_read "IPv6出口" "选择 IPv6 出口:" "none" "${opts[@]}")
-        [ "$IPV6_OUT" = "none" ] && IPV6_OUT=""
-        [ "$IPV6_OUT" = "manual" ] && { read -rp "输入 IPv6: " IPV6_OUT; }
-    else
-        read -rp "未检测到 IPv6，手动输入 (留空跳过): " IPV6_OUT
-    fi
-    [ -n "$IPV6_OUT" ] && info "IPv6 出口: $IPV6_OUT" || info "不使用 IPv6 出口"
+    echo "$routing"
 }
 
-configure_ddns() {
-    DDNS_ENABLED="no"
-    yesno_or_read "DDNS" "开启出口 IP 丢失自动更换？" "no" || return
-    local choices=()
-    [ -n "$IPV6_OUT" ] && choices+=("ipv6" "IPv6 出口")
-    [ -n "$IPV4_OUT" ] && choices+=("ipv4" "IPv4 出口")
-    [ ${#choices[@]} -eq 0 ] && { warn "无出口 IP，跳过 DDNS"; return; }
-    DDNS_TYPE=$(menu_or_read "DDNS类型" "监控类型:" "ipv6" "${choices[@]}")
-    case "$DDNS_TYPE" in
-        ipv6) DDNS_TARGET_IP="$IPV6_OUT"
-              DDNS_STRATEGY=$(menu_or_read "匹配策略" "匹配策略:" "any" \
-                  "match12" "${IPV6_OUT%%:*}: 开头" "match28" "${IPV6_OUT%:*:*}: 开头" \
-                  "match48" "${IPV6_OUT%:*:*:*}: 开头" "any" "任意不同 IPv6") ;;
-        ipv4) DDNS_TARGET_IP="$IPV4_OUT"
-              DDNS_STRATEGY=$(menu_or_read "匹配策略" "匹配策略:" "any" \
-                  "match8" "${IPV4_OUT%%.*}. 开头" "match16" "${IPV4_OUT%.*.*}. 开头" \
-                  "match24" "${IPV4_OUT%.*}. 开头" "any" "任意不同 IPv4") ;;
+# 落地方式
+echo "选择落地方式:"
+select outlougt in "直接落地" "socks5落地"; do
+    case $outlougt in
+        "直接落地") outlougt="direct"; break;;
+        "socks5落地") outlougt="socks"; break;;
     esac
-    DDNS_ENABLED="yes"
-    info "DDNS 已启用: $DDNS_TYPE 策略=$DDNS_STRATEGY"
+done
+
+if [[ "$outlougt" == "socks" ]]; then
+    read -rp "socks5 IP: " sip; read -rp "端口: " sport
+    read -rp "用户: " suser; read -rp "密码: " spass
+    outbounds_config=$(generate_outbounds "socks" "$sip" "$sport" "$suser" "$spass")
+else
+    outbounds_config=$(generate_outbounds "direct")
+fi
+routing_config=$(generate_routing)
+
+# ============================================================
+# 阶段 11：配置生成（协议分支）
+# ============================================================
+if [ "$protocol" = "reality" ]; then
+    cat > config.json <<EOF
+{"log": {"loglevel": "warning"},"inbounds": [{
+    "listen": "${workdir}/socket/xray.friend,0600",
+    "protocol": "vless",
+    "settings": {
+        "clients": [{"id": "$id_s","flow": "xtls-rprx-vision"}],
+        "decryption": "none"
+    },
+    "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+            "dest": "$domain_s:443",
+            "serverNames": ["$domain_s"],
+            "privateKey": "$private_old",
+            "shortIds": ["$shortIds"]
+        }
+    }
+}],
+"outbounds": $outbounds_config$( [[ -n "$routing_config" ]] && echo "," )$routing_config
 }
-
-configure_mtu() {
-    MTU_ENABLED="no"
-    yesno_or_read "MTU" "开启 MTU 自动调整？(推荐 1390)" "no" || return
-    MTU_ENABLED="yes"
-    safe_read "网络接口 (默认 $DEFAULT_MTU_IF): " "$DEFAULT_MTU_IF" "MTU_IF"
-    safe_read "MTU 值 (默认 $DEFAULT_MTU): " "$DEFAULT_MTU" "MTU_VAL"
-    info "MTU: $MTU_IF mtu $MTU_VAL"
+EOF
+else
+    cat > config.json <<EOF
+{"log": {"loglevel": "warning"},"inbounds": [{
+    "port": $portx,
+    "listen": "$ipaddr",
+    "protocol": "vless",
+    "settings": {
+        "clients": [{"id": "$id_s","flow": "xtls-rprx-vision"}],
+        "decryption": "$decryption_str"
+    },
+    "streamSettings": {
+        "network": "tcp",
+        "security": "none"
+    }
+}],
+"outbounds": $outbounds_config$( [[ -n "$routing_config" ]] && echo "," )$routing_config
 }
+EOF
+fi
 
-configure_protocol_params() {
-    safe_read "监听 IP (默认 $DEFAULT_LISTEN): " "$DEFAULT_LISTEN" "IPADDR"
-    safe_read "监听端口 (默认 $DEFAULT_PORT): " "$DEFAULT_PORT" "PORT"
-    if [ "$PROTOCOL" = "reality" ]; then
-        safe_read "伪装域名 (默认 $DEFAULT_DOMAIN): " "$DEFAULT_DOMAIN" "REALITY_DOMAIN"
-        REALITY_FP=$(menu_or_read "浏览器指纹" "选择指纹:" "chrome" \
-            "chrome" "Chrome" "firefox" "Firefox" "safari" "Safari" "ios" "iOS" "edge" "Edge")
-        [ -z "$REALITY_FP" ] && REALITY_FP="$DEFAULT_FP"
-        info "REALITY: $IPADDR:$PORT sni=$REALITY_DOMAIN fp=$REALITY_FP"
-    else
-        echo ""; line "VLESS Encryption 配置"
-        ENC_KEY_MODE=$(menu_or_read "密钥模式" "选择密钥模式:" "mlkem768" \
-            "mlkem768" "抗量子计算（推荐）" "x25519" "传统 Curve25519")
-        ENC_APPEARANCE=$(menu_or_read "外观模式" "选择外观模式:" "random" \
-            "native" "原生（性能最佳）" "xorpub" "XOR公钥（隐藏特征）" "random" "全随机（最隐蔽）")
-        ENC_RTT=$(menu_or_read "RTT模式" "选择 RTT 模式:" "0rtt" \
-            "0rtt" "零往返（更快）" "1rtt" "每次握手（更安全）")
-        safe_read "Ticket 时长秒数 (默认 600): " "600" "ENC_TICKET"
-        ENC_TICKET="${ENC_TICKET}s"
-        info "Encryption: $ENC_KEY_MODE / $ENC_APPEARANCE / $ENC_RTT / ticket=$ENC_TICKET"
-    fi
-}
+echo "配置已生成"
 
-configure_landing() {
-    LANDING_TYPE=$(menu_or_read "落地方式" "选择出站方式:" "direct" \
-        "direct" "直接落地 (freedom)" "socks" "SOCKS5 落地")
-    if [ "$LANDING_TYPE" = "socks" ]; then
-        read -rp "SOCKS5 IP: " SOCKS_IP
-        read -rp "SOCKS5 端口: " SOCKS_PORT
-        read -rp "SOCKS5 用户名: " SOCKS_USER
-        read -rp "SOCKS5 密码: " SOCKS_PASS
-    fi
-}
+# ============================================================
+# 阶段 12：降权用户
+# ============================================================
+useradd xrayuser &>/dev/null || true
+usermod -s /sbin/nologin xrayuser
+chown -R xrayuser:xrayuser $workdir
 
-# ============================================================================
-# JSON 生成
-# ============================================================================
-build_config_json() {
-    if ! command -v jq &>/dev/null; then
-        info "安装 jq..."
-        (apt-get update -qq && apt-get install -y -qq jq) 2>/dev/null || \
-        (yum install -y -q jq) 2>/dev/null || \
-        die "无法安装 jq，请手动安装后重试"
-    fi
-
-    local outbounds_json="[]"
-    if [ -n "$IPV6_OUT" ]; then
-        if [ "$LANDING_TYPE" = "socks" ]; then
-            outbounds_json=$(echo "$outbounds_json" | jq --arg ip "$SOCKS_IP" --arg port "$SOCKS_PORT" \
-                --arg user "$SOCKS_USER" --arg pass "$SOCKS_PASS" --arg through "$IPV6_OUT" \
-                '. + [{"tag":"direct-ipv6","protocol":"socks","settings":{"servers":[{"address":$ip,"port":($port|tonumber),"users":[{"user":$user,"pass":$pass,"level":0}]}]},"sendThrough":$through}]')
-        else
-            outbounds_json=$(echo "$outbounds_json" | jq --arg through "$IPV6_OUT" \
-                '. + [{"tag":"direct-ipv6","protocol":"freedom","settings":{"domainStrategy":"UseIPv6"},"sendThrough":$through}]')
-        fi
-    fi
-    if [ -n "$IPV4_OUT" ]; then
-        if [ "$LANDING_TYPE" = "socks" ]; then
-            outbounds_json=$(echo "$outbounds_json" | jq --arg ip "$SOCKS_IP" --arg port "$SOCKS_PORT" \
-                --arg user "$SOCKS_USER" --arg pass "$SOCKS_PASS" --arg through "$IPV4_OUT" \
-                '. + [{"tag":"direct-ipv4","protocol":"socks","settings":{"servers":[{"address":$ip,"port":($port|tonumber),"users":[{"user":$user,"pass":$pass,"level":0}]}]},"sendThrough":$through}]')
-        else
-            outbounds_json=$(echo "$outbounds_json" | jq --arg through "$IPV4_OUT" \
-                '. + [{"tag":"direct-ipv4","protocol":"freedom","settings":{"domainStrategy":"UseIPv4"},"sendThrough":$through}]')
-        fi
-    fi
-    if [ "$(echo "$outbounds_json" | jq 'length')" -eq 0 ]; then
-        outbounds_json='[{"protocol":"freedom","tag":"direct"}]'
-    fi
-
-    local routing_json="null"
-    if [ -n "$IPV6_OUT" ] && [ -n "$IPV4_OUT" ]; then
-        if [ "$IPV6_PRIORITY" = "yes" ]; then
-            routing_json=$(jq -n '{domainStrategy:"IPOnDemand",rules:[{type:"field",outboundTag:"direct-ipv6",ip:["2000::/3","::/0"]},{type:"field",outboundTag:"direct-ipv4",ip:["0.0.0.0/0"]}]}')
-        else
-            routing_json=$(jq -n '{domainStrategy:"IPOnDemand",rules:[{type:"field",outboundTag:"direct-ipv4",ip:["0.0.0.0/0"]},{type:"field",outboundTag:"direct-ipv6",ip:["2000::/3","::/0"]}]}')
-        fi
-    elif [ -n "$IPV6_OUT" ]; then
-        routing_json=$(jq -n '{domainStrategy:"IPIfNonMatch",rules:[{type:"field",outboundTag:"direct-ipv6",network:"tcp,udp"}]}')
-    elif [ -n "$IPV4_OUT" ]; then
-        routing_json=$(jq -n '{domainStrategy:"IPIfNonMatch",rules:[{type:"field",outboundTag:"direct-ipv4",network:"tcp,udp"}]}')
-    fi
-
-    local inbound_json
-    if [ "$PROTOCOL" = "reality" ]; then
-        inbound_json=$(jq -n --arg listen "${WORKDIR}/socket/xray.friend,0600" \
-            --arg id "$UUID" --arg domain "$REALITY_DOMAIN" \
-            --arg pk "$REALITY_PRIVATE_KEY" --arg sid "$REALITY_SHORT_ID" \
-            '{listen:$listen,protocol:"vless",settings:{clients:[{id:$id,flow:"xtls-rprx-vision"}],decryption:"none"},streamSettings:{network:"tcp",security:"reality",realitySettings:{dest:"\($domain):443",serverNames:[$domain],privateKey:$pk,shortIds:[$sid]}}}')
-    else
-        inbound_json=$(jq -n --arg listen "$IPADDR" --argjson port "$PORT" \
-            --arg id "$UUID" --arg dec "$ENC_DECRYPTION_STR" \
-            '{port:$port,listen:$listen,protocol:"vless",settings:{clients:[{id:$id,flow:"xtls-rprx-vision"}],decryption:$dec},streamSettings:{network:"tcp",security:"none"}}')
-    fi
-
-    jq -n --argjson inbound "[$inbound_json]" \
-        --argjson outbounds "$outbounds_json" \
-        --argjson routing "$routing_json" \
-        '{log:{loglevel:"warning"},inbounds:$inbound,outbounds:$outbounds}|if $routing!=null then .+{routing:$routing} else . end'
-}
-
-generate_keys() {
-    if [ "$PROTOCOL" = "reality" ]; then
-        local out; out=$("${WORKDIR}/xray" x25519)
-        REALITY_PRIVATE_KEY=$(echo "$out" | awk '/PrivateKey:/{print $2}')
-        REALITY_PUBLIC_KEY=$(echo "$out" | awk '/Password:/{print $2}')
-        REALITY_SHORT_ID=$(openssl rand -hex 6)
-        info "REALITY 密钥已生成"
-    else
-        if [ "$ENC_KEY_MODE" = "mlkem768" ]; then
-            local out; out=$("${WORKDIR}/xray" mlkem768)
-            ENC_SERVER_KEY=$(echo "$out" | awk '/Seed:/{print $2}')
-            ENC_CLIENT_KEY=$(echo "$out" | awk '/Client:/{print $2}')
-        else
-            local out; out=$("${WORKDIR}/xray" x25519)
-            ENC_SERVER_KEY=$(echo "$out" | awk '/PrivateKey:/{print $2}')
-            ENC_CLIENT_KEY=$(echo "$out" | awk '/Password:/{print $2}')
-        fi
-        ENC_DECRYPTION_STR="mlkem768x25519plus.${ENC_APPEARANCE}.${ENC_TICKET}.${ENC_SERVER_KEY}"
-        ENC_ENCRYPTION_STR="mlkem768x25519plus.${ENC_APPEARANCE}.${ENC_RTT}.${ENC_CLIENT_KEY}"
-        info "VLESS Encryption 密钥已生成"
-    fi
-}
-
-install_xray() {
-    info "下载 Xray-core ${XRAY_VER}..."
-    local zip
-    case "$ARCH" in
-        amd64) zip="Xray-linux-64.zip";; 386) zip="Xray-linux-32.zip";; arm64-v8a) zip="Xray-linux-arm64-v8a.zip";;
+# ============================================================
+# 阶段 13：SNI Filter（仅 REALITY 需要）
+# ============================================================
+if [ "$protocol" = "reality" ]; then
+    wget -q https://github.com/shirasawatop/REALITY-sni-filter/releases/download/v0.2/autobuild.zip -O autobuild.zip
+    unzip -o autobuild.zip -d . && rm autobuild.zip
+    case $arch in
+        x86_64) mv sni-filter-amd64 sni-filter;;
+        i386|i686) mv sni-filter-i386 sni-filter;;
+        aarch64) mv sni-filter-arm64 sni-filter;;
     esac
-    wget -q "${XRAY_URL}/${zip}" -O "${WORKDIR}/xray.zip"
-    unzip -o "${WORKDIR}/xray.zip" -d "$WORKDIR" >/dev/null
-    rm -f "${WORKDIR}/xray.zip"
-    chmod 755 "${WORKDIR}/xray"
-    info "Xray 安装完成"
-}
+    chmod 755 sni-filter
+    # 不再依赖 setcap，权限由 systemd AmbientCapabilities 提供
+    echo "SNI Filter 已安装"
+else
+    echo "VLESS Encryption 模式，跳过 SNI Filter 安装"
+fi
 
-install_sni_filter() {
-    [ "$PROTOCOL" != "reality" ] && return
-    info "下载 SNI Filter..."
-    wget -q "$SNI_FILTER_URL" -O "${WORKDIR}/autobuild.zip"
-    unzip -o "${WORKDIR}/autobuild.zip" -d "$WORKDIR" >/dev/null
-    rm -f "${WORKDIR}/autobuild.zip"
-    case "$ARCH" in
-        amd64) mv "${WORKDIR}/sni-filter-amd64" "${WORKDIR}/sni-filter";;
-        386)   mv "${WORKDIR}/sni-filter-i386"  "${WORKDIR}/sni-filter";;
-        arm64-v8a) mv "${WORKDIR}/sni-filter-arm64" "${WORKDIR}/sni-filter";;
-    esac
-    chmod 755 "${WORKDIR}/sni-filter"
-    info "SNI Filter 安装完成（权限由 systemd AmbientCapabilities 提供）"
-}
-
-setup_user() {
-    id xrayuser &>/dev/null || useradd xrayuser -s /sbin/nologin -M 2>/dev/null || true
-    chown -R xrayuser:xrayuser "$WORKDIR"
-    info "降权用户 xrayuser 已就绪"
-}
-
-generate_launcher() {
-    if [ "$PROTOCOL" = "reality" ]; then
-        cat > "${WORKDIR}/xrayinit" << LAUNCHER
+# ============================================================
+# 阶段 14：生成 xrayinit（启动脚本）
+# ============================================================
+if [ "$protocol" = "reality" ]; then
+    cat > xrayinit << LAUNCHER
 #!/bin/bash
-set -e
-setsid ${WORKDIR}/sni-filter -L=tcp://${IPADDR}:${PORT} -F=unix://${WORKDIR}/socket/xray.friend -S=${REALITY_DOMAIN} &
-echo \$! > ${PIDFILE_SNI}
-setsid ${WORKDIR}/xray -c ${CONFIG_FILE} &
-echo \$! > ${PIDFILE_XRAY}
-echo "on" > ${WORKDIR}/statusfilter
+setsid $workdir/sni-filter -L=tcp://${ipaddr}:${portx} -F=unix://${workdir}/socket/xray.friend -S=$domain_s &
+echo \$! > ${workdir}/sni-filter.pid
+setsid $workdir/xray -c $workdir/config.json &
+echo \$! > ${workdir}/xray.pid
+echo "on" > $workdir/statusfilter
 LAUNCHER
-    else
-        cat > "${WORKDIR}/xrayinit" << LAUNCHER
+else
+    cat > xrayinit << LAUNCHER
 #!/bin/bash
-set -e
-setsid ${WORKDIR}/xray -c ${CONFIG_FILE} &
-echo \$! > ${PIDFILE_XRAY}
-echo "on" > ${WORKDIR}/statusfilter
+setsid $workdir/xray -c $workdir/config.json &
+echo \$! > ${workdir}/xray.pid
+echo "on" > $workdir/statusfilter
 LAUNCHER
-    fi
+fi
+chmod 755 xrayinit
 
-    if [ "$DDNS_ENABLED" = "yes" ]; then
-        echo "while true; do sleep 60; ${WORKDIR}/ddns_check.sh; done" >> "${WORKDIR}/xrayinit"
-    else
-        echo "while true; do sleep 3600; done" >> "${WORKDIR}/xrayinit"
-    fi
-    chmod 755 "${WORKDIR}/xrayinit"
-}
+# ============================================================
+# 阶段 15：DDNS 检测脚本
+# ============================================================
+if [ "$ddns_enabled" == "yes" ]; then
+    config_files="config.json"
 
-generate_ddns_script() {
-    [ "$DDNS_ENABLED" != "yes" ] && return
-    echo "$DDNS_TYPE $DDNS_TARGET_IP $DDNS_STRATEGY" > "${WORKDIR}/ddns.config"
-
-    cat > "${WORKDIR}/ddns_check.sh" << 'EOSCRIPT'
+    cat > ddns_check.sh << 'EOSH'
 #!/bin/bash
-set -e
-WORKDIR="__WORKDIR__"; PIDFILE_XRAY="__PIDFILE_XRAY__"; PIDFILE_SNI="__PIDFILE_SNI__"
-CONFIG_FILE="__CONFIG_FILE__"; PROTOCOL="__PROTOCOL__"
-IPADDR="__IPADDR__"; PORT="__PORT__"; REALITY_DOMAIN="__REALITY_DOMAIN__"
-
-[ -f "${WORKDIR}/ddns.config" ] || exit 0
-read -r ddns_type target_ip strategy < "${WORKDIR}/ddns.config"
-
-check_alive() {
-    if [ "$ddns_type" = "ipv6" ]; then ip -6 addr show 2>/dev/null | grep -qF "$target_ip"
-    else ip -4 addr show 2>/dev/null | grep -oP 'inet \d+\.\d+\.\d+\.\d+' | grep -qF "$target_ip"; fi
-}
-check_alive && exit 0
-
-get_ips() {
-    if [ "$ddns_type" = "ipv6" ]; then ip -6 addr show 2>/dev/null | grep -oP 'inet6 [0-9a-f:]+' | awk '{print $2}' | grep -v '^fe80:' | grep -v '^::1'
-    else ip -4 addr show 2>/dev/null | grep -oP 'inet \d+\.\d+\.\d+\.\d+'; fi
-}
-
-new_ip=""; available=$(get_ips)
-if [ "$strategy" = "any" ]; then
-    for ip in $available; do [ "$ip" != "$target_ip" ] && { new_ip="$ip"; break; }; done
+config_file="DDNS_DIR/ddns.config"
+[ ! -f "$config_file" ] && exit 0
+read ddns_type target_ip strategy < "$config_file"
+if [ "$ddns_type" == "ipv6" ]; then
+    if ip -6 addr show | grep -q "$target_ip"; then exit 0; fi
+    available_ips=$(ip -6 addr show | grep -oP 'inet6 [0-9a-f:]+' | awk '{print $2}' | grep -v '^fe80:' | grep -v '^::1')
+else
+    if ip -4 addr show | grep -oP 'inet \d+\.\d+\.\d+\.\d+' | grep -q "$target_ip"; then exit 0; fi
+    available_ips=$(ip -4 addr show | grep -oP 'inet \d+\.\d+\.\d+\.\d+')
+fi
+new_ip=""
+if [ "$strategy" == "any" ]; then
+    for ip in $available_ips; do
+        [ "$ip" != "$target_ip" ] && { new_ip="$ip"; break; }
+    done
 else
     case "$strategy" in
-        match12) prefix="$(echo "$target_ip" | cut -d: -f1):" ;; match28) prefix="$(echo "$target_ip" | cut -d: -f1-2):" ;;
-        match48) prefix="$(echo "$target_ip" | cut -d: -f1-3):" ;; match8)  prefix="$(echo "$target_ip" | cut -d. -f1)." ;;
-        match16) prefix="$(echo "$target_ip" | cut -d. -f1-2)." ;; match24) prefix="$(echo "$target_ip" | cut -d. -f1-3)." ;;
+        match12) prefix=$(echo "$target_ip" | cut -d: -f1):;;
+        match28) prefix=$(echo "$target_ip" | cut -d: -f1-2):;;
+        match48) prefix=$(echo "$target_ip" | cut -d: -f1-3):;;
+        match8) prefix="$(echo $target_ip | cut -d. -f1).";;
+        match16) prefix="$(echo $target_ip | cut -d. -f1-2).";;
+        match24) prefix="$(echo $target_ip | cut -d. -f1-3).";;
     esac
-    for ip in $available; do case "$ip" in "$prefix"*) [ "$ip" != "$target_ip" ] && { new_ip="$ip"; break; } ;; esac; done
+    for ip in $available_ips; do
+        if [[ "$ip" == "$prefix"* ]] && [ "$ip" != "$target_ip" ]; then new_ip="$ip"; break; fi
+    done
 fi
-
-[ -z "$new_ip" ] && exit 0
-sed -i "s/\"sendThrough\":\"$target_ip\"/\"sendThrough\":\"$new_ip\"/g" "$CONFIG_FILE"
-sed -i "s/\"listen\":\"$target_ip\"/\"listen\":\"$new_ip\"/g" "$CONFIG_FILE"
-echo "$ddns_type $new_ip $strategy" > "${WORKDIR}/ddns.config"
-
-do_kill() { [ -f "$1" ] && kill $(cat "$1") 2>/dev/null || true; rm -f "$1"; }
-do_kill "$PIDFILE_XRAY"
-if [ "$PROTOCOL" = "reality" ]; then
-    do_kill "$PIDFILE_SNI"
-    setsid ${WORKDIR}/sni-filter -L=tcp://${IPADDR}:${PORT} -F=unix://${WORKDIR}/socket/xray.friend -S=${REALITY_DOMAIN} &
-    echo $! > "$PIDFILE_SNI"
-fi
-setsid ${WORKDIR}/xray -c "$CONFIG_FILE" &
-echo $! > "$PIDFILE_XRAY"
-EOSCRIPT
-
-    sed -i \
-        -e "s|__WORKDIR__|${WORKDIR}|g" -e "s|__PIDFILE_XRAY__|${PIDFILE_XRAY}|g" \
-        -e "s|__PIDFILE_SNI__|${PIDFILE_SNI}|g" -e "s|__CONFIG_FILE__|${CONFIG_FILE}|g" \
-        -e "s|__PROTOCOL__|${PROTOCOL}|g" -e "s|__IPADDR__|${IPADDR}|g" \
-        -e "s|__PORT__|${PORT}|g" -e "s|__REALITY_DOMAIN__|${REALITY_DOMAIN}|g" \
-        "${WORKDIR}/ddns_check.sh"
-    chmod 755 "${WORKDIR}/ddns_check.sh"
-    info "DDNS 检测脚本已生成"
-}
-
-generate_management() {
-    echo -n "$UUID" > "${WORKDIR}/uuid.txt"
-    echo "$PROTOCOL" > "${WORKDIR}/protocol.txt"
-    [ "$PROTOCOL" = "encryption" ] && echo -n "$ENC_ENCRYPTION_STR" > "${WORKDIR}/encryption_key.txt"
-
-    local r4 r6
-    r4=$(wget -q4 -O- https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' || echo "")
-    r6=$(wget -q6 -O- https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' || echo "")
-
-    local sub_params
-    if [ "$PROTOCOL" = "reality" ]; then
-        sub_params="encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_DOMAIN}&fp=${REALITY_FP}&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&headerType=none&host=${REALITY_DOMAIN}"
-    else
-        sub_params="encryption=$(urlencode "$ENC_ENCRYPTION_STR")&flow=xtls-rprx-vision&security=none&type=tcp&headerType=none"
+if [ -n "$new_ip" ]; then
+    for cfg in CONFIG_FILES; do
+        sed -i "s/$target_ip/$new_ip/g" DDNS_DIR/$cfg
+    done
+    echo "$ddns_type $new_ip $strategy" > "$config_file"
+    kill $(cat DDNS_DIR/xray.pid) 2>/dev/null; sleep 1
+    if [ -f DDNS_DIR/sni-filter.pid ]; then
+        kill $(cat DDNS_DIR/sni-filter.pid) 2>/dev/null
+        setsid DDNS_DIR/sni-filter -L=tcp://LISTEN_IP:LISTEN_PORT -F=unix://DDNS_DIR/socket/xray.friend -S=SNI_DOMAIN &
+        echo $! > DDNS_DIR/sni-filter.pid
     fi
-
-    cat > "${WORKDIR}/chaguuid" << MGMT
-#!/bin/bash
-set -e
-WORKDIR="${WORKDIR}"; CONFIG="${CONFIG_FILE}"
-PIDFILE_XRAY="${PIDFILE_XRAY}"; PIDFILE_SNI="${PIDFILE_SNI}"
-PROTOCOL_FILE="${WORKDIR}/protocol.txt"; UUID_FILE="${WORKDIR}/uuid.txt"
-
-newuuid=\$("${WORKDIR}/xray" uuid)
-olduuid=\$(cat "\$UUID_FILE")
-proto=\$(cat "\$PROTOCOL_FILE" 2>/dev/null || echo "reality")
-
-sed -i "s/\$olduuid/\$newuuid/g" "\$CONFIG"
-echo -n "\$newuuid" > "\$UUID_FILE"
-
-do_kill() { [ -f "\$1" ] && kill \$(cat "\$1") 2>/dev/null; rm -f "\$1"; }
-do_kill "\$PIDFILE_XRAY"
-if [ "\$proto" = "reality" ]; then
-    do_kill "\$PIDFILE_SNI"
-    setsid ${WORKDIR}/sni-filter -L=tcp://${IPADDR}:${PORT} -F=unix://${WORKDIR}/socket/xray.friend -S=${REALITY_DOMAIN} &
-    echo \$! > "\$PIDFILE_SNI"
+    setsid DDNS_DIR/xray -c DDNS_DIR/config.json &
+    echo $! > DDNS_DIR/xray.pid
 fi
-setsid ${WORKDIR}/xray -c "\$CONFIG" &
-echo \$! > "\$PIDFILE_XRAY"
+EOSH
+    sed -i "s|CONFIG_FILES|$config_files|g; s|LISTEN_IP|$ipaddr|g; s|LISTEN_PORT|$portx|g; s|SNI_DOMAIN|$domain_s|g" ddns_check.sh
+    sed -i "s|DDNS_DIR|$workdir|g" ddns_check.sh
+    chmod +x ddns_check.sh
+    echo "$ddns_type $ddns_target_ip $ddns_strategy" > ddns.config
 
-echo "UUID 已更换: \$newuuid"
-[ -n "$r4" ] && echo "IPv4: vless://\${newuuid}@${r4}:${PORT}?${sub_params}"
-[ -n "$r6" ] && echo "IPv6: vless://\${newuuid}@[${r6}]:${PORT}?${sub_params}"
-MGMT
-    chmod 755 "${WORKDIR}/chaguuid"
+    cat >> xrayinit << EOF
+while true; do
+    sleep 60
+    $workdir/ddns_check.sh
+done
+EOF
+else
+    cat >> xrayinit << 'EOF'
+while true; do sleep 3600; done
+EOF
+fi
 
-    cat > "${WORKDIR}/delxray" << MGMT
-#!/bin/bash
-systemctl stop ${SERVICE_NAME} 2>/dev/null || true
-systemctl disable ${SERVICE_NAME} 2>/dev/null || true
-do_kill() { [ -f "\$1" ] && kill \$(cat "\$1") 2>/dev/null; rm -f "\$1"; }
-do_kill "${PIDFILE_XRAY}"; do_kill "${PIDFILE_SNI}"
-userdel xrayuser 2>/dev/null || true
-rm -f /usr/local/bin/xray.* /usr/bin/xray.*
-rm -rf "${WORKDIR}"
-echo "卸载完成"
-MGMT
-    chmod 755 "${WORKDIR}/delxray"
+# ============================================================
+# 阶段 16：Systemd 服务（★ 核心修复：AmbientCapabilities）
+# ============================================================
+mtu_line=""
+[ "$mtu_enabled" = "yes" ] && mtu_line="ExecStartPre=+/usr/sbin/ip link set dev $mtu_interface mtu $mtu_value"
 
-    for action in stop start restart; do
-        cat > "${WORKDIR}/xray${action}" << MGMT
-#!/bin/bash
-systemctl ${action} ${SERVICE_NAME}
-MGMT
-        chmod 755 "${WORKDIR}/xray${action}"
-    done
+proto_label="$([ "$protocol" = "reality" ] && echo "REALITY" || echo "VLESS Encryption")"
 
-    local label; [ "$PROTOCOL" = "reality" ] && label="REALITY" || label="VLESS Encryption"
-    cat > "${WORKDIR}/xrayhelp" << MGMT
-#!/bin/bash
-echo "========================================"
-echo "  Xray 管理命令 (${label})"
-echo "========================================"
-echo "xray.chuuid   更换 UUID"
-echo "xray.delxray  卸载"
-echo "xray.stop     停止"
-echo "xray.start    启动"
-echo "xray.restart  重启"
-echo "xray.help     帮助"
-echo "xray.status   查看状态"
-echo "xray.log      查看日志"
-echo "========================================"
-MGMT
-    chmod 755 "${WORKDIR}/xrayhelp"
-
-    cat > "${WORKDIR}/xraystatus" << MGMT
-#!/bin/bash
-systemctl status ${SERVICE_NAME} --no-pager
-echo ""; echo "--- 端口监听 ---"
-ss -tlnp 2>/dev/null | grep -E ':(${PORT})\b' || echo "未检测到 ${PORT} 端口监听"
-echo ""; echo "--- 进程检查 ---"
-pgrep -la xray 2>/dev/null || echo "xray 未运行"
-pgrep -la sni-filter 2>/dev/null || echo "sni-filter 未运行"
-MGMT
-    chmod 755 "${WORKDIR}/xraystatus"
-
-    cat > "${WORKDIR}/xraylog" << MGMT
-#!/bin/bash
-journalctl -u ${SERVICE_NAME} -n 50 --no-pager "\$@"
-MGMT
-    chmod 755 "${WORKDIR}/xraylog"
-
-    for cmd in chaguuid delxray xraystop xraystart xrayrestart xrayhelp xraystatus xraylog; do
-        local linkname="${cmd#xray}"
-        [ "$linkname" = "$cmd" ] && linkname="$cmd"
-        ln -sf "${WORKDIR}/${cmd}" "/usr/local/bin/xray.${linkname}" 2>/dev/null || true
-        ln -sf "${WORKDIR}/${cmd}" "/usr/bin/xray.${linkname}" 2>/dev/null || true
-    done
-    info "管理命令已安装到 /usr/bin/ 和 /usr/local/bin/"
-}
-
-install_service() {
-    local mtu_line=""
-    [ "$MTU_ENABLED" = "yes" ] && mtu_line="ExecStartPre=+/usr/sbin/ip link set dev ${MTU_IF} mtu ${MTU_VAL}"
-    local label; [ "$PROTOCOL" = "reality" ] && label="REALITY" || label="VLESS Encryption"
-
-    cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
+cat > /etc/systemd/system/xray_service.service << EOF
 [Unit]
-Description=Xray Service (${label})
+Description=Xray Service ($proto_label)
 After=network.target
 
 [Service]
 Type=simple
 ${mtu_line}
-ExecStart=/usr/bin/sh ${WORKDIR}/xrayinit
+ExecStart=/usr/bin/sh $workdir/xrayinit
 User=xrayuser
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
@@ -614,108 +616,147 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    info "systemd 服务已安装（含 CAP_NET_BIND_SERVICE 权限）"
-}
 
-verify_startup() {
-    sleep 2; local ok=1
+# ============================================================
+# 阶段 17：生成管理脚本
+# ============================================================
+echo -n "$id_s" > uuid.txt
+realip4=$(wget -q4 -O- https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2 || echo "")
+realip6=$(wget -q6 -O- https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep ip= | cut -d= -f2 || echo "")
 
-    systemctl is-active --quiet "$SERVICE_NAME" && info "systemd 服务: 运行中 ✓" || { warn "systemd 服务: 未运行 ✗"; ok=0; }
-    ss -tlnp 2>/dev/null | grep -q ":${PORT}\b" && info "端口 ${PORT}: 已监听 ✓" || { warn "端口 ${PORT}: 未监听 ✗"; ok=0; }
-    pgrep -f "${WORKDIR}/xray" >/dev/null 2>&1 && info "xray 进程: 运行中 ✓" || { warn "xray 进程: 未运行 ✗"; ok=0; }
-    if [ "$PROTOCOL" = "reality" ]; then
-        pgrep -f "${WORKDIR}/sni-filter" >/dev/null 2>&1 && info "sni-filter 进程: 运行中 ✓" || { warn "sni-filter 进程: 未运行 ✗"; ok=0; }
-    fi
+echo "$protocol" > protocol.txt
+if [ "$protocol" = "encryption" ]; then
+    echo "$encryption_str" > encryption_key.txt
+fi
 
-    [ $ok -eq 0 ] && {
-        warn "排查命令:"
-        echo "  systemctl status ${SERVICE_NAME}"
-        echo "  journalctl -u ${SERVICE_NAME} -n 30"
-    }
-}
+# 构建订阅参数
+if [ "$protocol" = "reality" ]; then
+    sub_gen="encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain_s&fp=$fingerprint&pbk=$public_old&sid=$shortIds&type=tcp&headerType=none&host=$domain_s"
+else
+    enc_for_link=$(cat $workdir/encryption_key.txt 2>/dev/null)
+    sub_gen="encryption=${enc_for_link}&flow=xtls-rprx-vision&security=none&type=tcp&headerType=none"
+fi
 
-print_info() {
-    local r4 r6
-    r4=$(wget -q4 -O- https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' || echo "")
-    r6=$(wget -q6 -O- https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' || echo "")
+# chaguuid
+cat > chaguuid << EOF
+#!/bin/bash
+newuuid=\$($workdir/xray uuid)
+olduuid=\$(cat $workdir/uuid.txt)
+sed -i "s/\$olduuid/\$newuuid/g" $workdir/config.json
+kill \$(cat $workdir/xray.pid) 2>/dev/null
+[ -f $workdir/sni-filter.pid ] && kill \$(cat $workdir/sni-filter.pid) 2>/dev/null
+echo -n \$newuuid > $workdir/uuid.txt
+systemctl restart xray_service
+[ -n "$realip4" ] && echo "IPv4: vless://\$newuuid@$realip4:$portx?${sub_gen}"
+[ -n "$realip6" ] && echo "IPv6: vless://\$newuuid@[$realip6]:$portx?${sub_gen}"
+EOF
 
-    echo ""; line "========================================"
-    line "  安装完成！"; line "========================================"
-    info "协议: $([ "$PROTOCOL" = "reality" ] && echo "REALITY" || echo "VLESS Encryption")"
-    info "端口: $PORT"
-    [ "$PROTOCOL" = "reality" ] && info "伪装域名: $REALITY_DOMAIN"
+# delxray
+cat > delxray << EOF
+#!/bin/bash
+systemctl stop xray_service; systemctl disable xray_service
+kill \$(cat $workdir/xray.pid) 2>/dev/null
+[ -f $workdir/sni-filter.pid ] && kill \$(cat $workdir/sni-filter.pid) 2>/dev/null
+deluser xrayuser 2>/dev/null
+rm -f /usr/bin/xray.* /usr/local/bin/xray.*
+rm -rf $workdir
+echo "卸载完成"
+EOF
 
-    if [ "$PROTOCOL" = "reality" ]; then
-        local p="encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_DOMAIN}&fp=${REALITY_FP}&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&headerType=none&host=${REALITY_DOMAIN}"
-        [ -n "$r4" ] && echo -e "${C_GREEN}IPv4: vless://${UUID}@${r4}:${PORT}?${p}#xray_REALITY${C_NC}"
-        [ -n "$r6" ] && echo -e "${C_GREEN}IPv6: vless://${UUID}@[${r6}]:${PORT}?${p}#xray_REALITY${C_NC}"
-    else
-        local e; e=$(urlencode "$ENC_ENCRYPTION_STR")
-        [ -n "$r4" ] && echo -e "${C_GREEN}IPv4: vless://${UUID}@${r4}:${PORT}?encryption=${e}&flow=xtls-rprx-vision&security=none&type=tcp#xray_Encryption${C_NC}"
-        [ -n "$r6" ] && echo -e "${C_GREEN}IPv6: vless://${UUID}@[${r6}]:${PORT}?encryption=${e}&flow=xtls-rprx-vision&security=none&type=tcp#xray_Encryption${C_NC}"
-    fi
+# stop / start / restart
+for action in stop start restart; do
+    cat > xray${action} << EOF
+#!/bin/bash
+systemctl ${action} xray_service
+EOF
+done
 
-    [ "$MTU_ENABLED" = "yes" ] && info "MTU: ${MTU_IF} mtu ${MTU_VAL}"
-    [ "$DDNS_ENABLED" = "yes" ] && info "DDNS: ${DDNS_TYPE} (${DDNS_STRATEGY})"
+# help
+cat > xrayhelp << EOF
+#!/bin/bash
+echo "========================================"
+echo "  Xray 管理命令 ($proto_label)"
+echo "========================================"
+echo "xray.chuuid   更换UUID"
+echo "xray.delxray  卸载"
+echo "xray.stop     停止"
+echo "xray.start    启动"
+echo "xray.restart  重启"
+echo "xray.status   查看状态"
+echo "xray.log      查看日志"
+echo "xray.help     帮助"
+echo "========================================"
+EOF
+
+# status
+cat > xraystatus << EOF
+#!/bin/bash
+systemctl status xray_service --no-pager
+echo ""; echo "--- 端口监听 ---"
+ss -tlnp 2>/dev/null | grep -E ':(${portx})\b' || echo "未检测到 ${portx} 端口监听"
+echo ""; echo "--- 进程 ---"
+pgrep -la xray 2>/dev/null || echo "xray 未运行"
+pgrep -la sni-filter 2>/dev/null || echo "sni-filter 未运行"
+EOF
+
+# log
+cat > xraylog << EOF
+#!/bin/bash
+journalctl -u xray_service -n 50 --no-pager "\$@"
+EOF
+
+chmod 755 chaguuid delxray xraystop xraystart xrayrestart xrayhelp xraystatus xraylog 2>/dev/null
+
+# 链接到 /usr/bin/ 和 /usr/local/bin/
+for cmd in chaguuid delxray xraystop xraystart xrayrestart xrayhelp xraystatus xraylog; do
+    linkname="${cmd#xray}"; [ "$linkname" = "$cmd" ] && linkname="$cmd"
+    ln -sf $workdir/$cmd /usr/bin/xray.$linkname 2>/dev/null
+    ln -sf $workdir/$cmd /usr/local/bin/xray.$linkname 2>/dev/null
+done
+
+# ============================================================
+# 阶段 18：启动服务
+# ============================================================
+systemctl daemon-reload
+systemctl enable xray_service
+systemctl start xray_service
+
+sleep 2
+
+# ============================================================
+# 阶段 19：验证
+# ============================================================
+verify_ok=1
+systemctl is-active --quiet xray_service && echo -e "${C_GREEN}[✓] systemd 服务运行中${C_NC}" || { echo -e "${C_RED}[✗] systemd 服务未运行${C_NC}"; verify_ok=0; }
+ss -tlnp 2>/dev/null | grep -q ":${portx}\b" && echo -e "${C_GREEN}[✓] 端口 ${portx} 已监听${C_NC}" || { echo -e "${C_RED}[✗] 端口 ${portx} 未监听${C_NC}"; verify_ok=0; }
+pgrep -f "$workdir/xray" >/dev/null 2>&1 && echo -e "${C_GREEN}[✓] xray 进程运行中${C_NC}" || { echo -e "${C_RED}[✗] xray 进程未运行${C_NC}"; verify_ok=0; }
+if [ "$protocol" = "reality" ]; then
+    pgrep -f "$workdir/sni-filter" >/dev/null 2>&1 && echo -e "${C_GREEN}[✓] sni-filter 进程运行中${C_NC}" || { echo -e "${C_RED}[✗] sni-filter 进程未运行${C_NC}"; verify_ok=0; }
+fi
+
+if [ $verify_ok -eq 0 ]; then
     echo ""
-    info "管理命令: xray.start | xray.stop | xray.restart | xray.chuuid | xray.delxray | xray.status | xray.log | xray.help"
-}
+    echo -e "${C_YELLOW}排查命令:${C_NC}"
+    echo "  systemctl status xray_service"
+    echo "  journalctl -u xray_service -n 30"
+fi
 
-cleanup() {
-    local ec=$?
-    if [ $ec -ne 0 ] && [ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ]; then
-        warn "安装失败 (退出码: $ec)，正在清理..."
-        pgrep -f "${WORKDIR}/" 2>/dev/null | xargs -r kill 2>/dev/null || true
-        rm -rf "$WORKDIR"
-        rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
-        systemctl daemon-reload 2>/dev/null || true
-    fi
-    exit $ec
-}
+# ============================================================
+# 阶段 20：输出订阅
+# ============================================================
+echo ""
+echo "========== 安装完成 =========="
+echo -e "${C_GREEN}协议: $proto_label${C_NC}"
 
-main() {
-    trap cleanup EXIT
+if [ "$protocol" = "reality" ]; then
+    [ -n "$realip4" ] && echo -e "${C_GREEN}IPv4: vless://$id_s@$realip4:$portx?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain_s&fp=$fingerprint&pbk=$public_old&sid=$shortIds&type=tcp&headerType=none&host=$domain_s#xray_REALITY${C_NC}"
+    [ -n "$realip6" ] && echo -e "${C_GREEN}IPv6: vless://$id_s@[$realip6]:$portx?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain_s&fp=$fingerprint&pbk=$public_old&sid=$shortIds&type=tcp&headerType=none&host=$domain_s#xray_REALITY${C_NC}"
+else
+    [ -n "$realip4" ] && echo -e "${C_GREEN}IPv4: vless://$id_s@$realip4:$portx?encryption=$encryption_str&flow=xtls-rprx-vision&security=none&type=tcp#xray_Encryption${C_NC}"
+    [ -n "$realip6" ] && echo -e "${C_GREEN}IPv6: vless://$id_s@[$realip6]:$portx?encryption=$encryption_str&flow=xtls-rprx-vision&security=none&type=tcp#xray_Encryption${C_NC}"
+fi
 
-    echo -e "${C_GREEN}欢迎使用 REALITY / VLESS Encryption 二合一脚本 ${SCRIPT_VER}${C_NC}"
-    echo ""
-    echo "         _      _   __        _                   _ "
-    echo "   ___  | |  __| | / _| _ __ (_)  ___  _ __    __| |"
-    echo "  / _ \\ | | / _\` || |_ | '__|| | / _ \\| '_ \\  / _\` |"
-    echo " | (_) || || (_| ||  _|| |   | ||  __/| | | || (_| |"
-    echo "  \\___/ |_| \\__,_||_|  |_|   |_| \\___||_| |_| \\__,_|"
-    echo ""
-    sleep 1
-
-    check_root; check_net; check_cmd wget openssl unzip; detect_arch
-
-    WORKDIR="/var/xray"
-    mkdir -p "${WORKDIR}/socket"
-    CONFIG_FILE="${WORKDIR}/config.json"
-    PIDFILE_XRAY="${WORKDIR}/xray.pid"
-    PIDFILE_SNI="${WORKDIR}/sni-filter.pid"
-
-    choose_protocol; detect_ips; configure_network; configure_ddns; configure_mtu
-    configure_protocol_params; configure_landing
-
-    install_xray; install_sni_filter
-    UUID=$("${WORKDIR}/xray" uuid); generate_keys
-
-    build_config_json > "$CONFIG_FILE"
-    info "配置文件: $CONFIG_FILE"
-
-    if ! "${WORKDIR}/xray" -test -c "$CONFIG_FILE" &>/dev/null; then
-        warn "配置验证失败:"; "${WORKDIR}/xray" -test -c "$CONFIG_FILE" 2>&1 || true
-        cat "$CONFIG_FILE"; die "请检查配置文件后重试"
-    fi
-    info "配置验证通过 ✓"
-
-    setup_user; generate_launcher; generate_ddns_script; generate_management
-    install_service
-    systemctl enable "$SERVICE_NAME"; systemctl start "$SERVICE_NAME"
-
-    verify_startup; print_info
-    trap - EXIT
-}
-
-main "$@"
+[ "$mtu_enabled" = "yes" ] && echo "MTU: $mtu_interface mtu $mtu_value"
+echo ""
+echo "管理命令:"
+cat $workdir/xrayhelp

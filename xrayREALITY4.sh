@@ -1,11 +1,11 @@
 #!/bin/bash
 # ============================================================================
-# Xray REALITY / VLESS Encryption 二合一部署脚本 v20260710-r5
-# 修复: 用 AmbientCapabilities 替代 setcap，解决非特权端口绑定问题
+# Xray REALITY / VLESS Encryption 二合一部署脚本 v20260710-r6
+# 修复: 移除 whiptail 的 </dev/tty，避免终端环境下 whiptail 崩溃
 # ============================================================================
 set -eo pipefail
 
-readonly SCRIPT_VER="v20260710-r5"
+readonly SCRIPT_VER="v20260710-r6"
 readonly XRAY_VER="v25.10.15"
 readonly XRAY_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}"
 readonly SNI_FILTER_URL="https://github.com/shirasawatop/REALITY-sni-filter/releases/download/v0.2/autobuild.zip"
@@ -23,12 +23,8 @@ readonly C_YELLOW='\e[33m'; readonly C_CYAN='\e[36m'; readonly C_NC='\e[0m'
 # ============================================================================
 # 全局变量
 # ============================================================================
-PROTOCOL=""
-WORKDIR=""
-ARCH=""
-CONFIG_FILE=""
-PIDFILE_XRAY=""; PIDFILE_SNI=""
-SERVICE_NAME="xray_service"
+PROTOCOL=""; WORKDIR=""; ARCH=""; CONFIG_FILE=""
+PIDFILE_XRAY=""; PIDFILE_SNI=""; SERVICE_NAME="xray_service"
 
 IPADDR="$DEFAULT_LISTEN"; PORT="$DEFAULT_PORT"
 IPV4_OUT=""; IPV6_OUT=""; IPV6_PRIORITY="yes"
@@ -61,7 +57,7 @@ line() { echo -e "${C_CYAN}$*${C_NC}"; }
 
 safe_read() {
     local prompt="$1" default="$2" var_name="$3"
-    read -rp "$prompt" "$var_name" </dev/tty
+    read -rp "$prompt" "$var_name"
     [ -z "${!var_name}" ] && eval "$var_name=\"$default\""
 }
 
@@ -120,33 +116,27 @@ detect_ips() {
     done < <(ip -6 addr show 2>/dev/null | awk '/inet6 /{print $NF, $2}' | sed 's|/.*||')
 
     echo ""; line "IPv4:"; local i=0
-    for k in "${!IPV4_MAP[@]}"; do
-        i=$((i+1)); echo "  [$i] $k: ${IPV4_MAP[$k]}"
-    done
+    for k in "${!IPV4_MAP[@]}"; do i=$((i+1)); echo "  [$i] $k: ${IPV4_MAP[$k]}"; done
     [ $i -eq 0 ] && echo "  (无)"
 
     echo ""; line "IPv6:"; i=0
-    for k in "${!IPV6_MAP[@]}"; do
-        i=$((i+1)); echo "  [$i] $k: ${IPV6_MAP[$k]}"
-    done
+    for k in "${!IPV6_MAP[@]}"; do i=$((i+1)); echo "  [$i] $k: ${IPV6_MAP[$k]}"; done
     [ $i -eq 0 ] && echo "  (无)"
     echo ""
 }
 
 # ============================================================================
-# 交互式选择
+# 交互式选择（★ 不再使用 </dev/tty，让 whiptail 自己管理终端）
 # ============================================================================
 menu_or_read() {
     local title="$1" prompt="$2" default="$3"; shift 3
     if has_whiptail; then
-        whiptail --title "$title" --menu "$prompt" 18 60 8 "$@" 3>&1 1>&2 2>&3 </dev/tty || echo "$default"
+        whiptail --title "$title" --menu "$prompt" 18 60 8 "$@" 3>&1 1>&2 2>&3 || echo "$default"
     else
         echo "$prompt"
         local keys=() i=1
-        while [ $# -gt 0 ]; do
-            keys+=("$1"); echo "  $i) $2"; shift 2; i=$((i+1))
-        done
-        read -rp "选择 (默认 ${default}): " c </dev/tty
+        while [ $# -gt 0 ]; do keys+=("$1"); echo "  $i) $2"; shift 2; i=$((i+1)); done
+        read -rp "选择 (默认 ${default}): " c
         [ -z "$c" ] && { echo "$default"; return; }
         echo "${keys[$((c-1))]:-$default}"
     fi
@@ -155,16 +145,16 @@ menu_or_read() {
 yesno_or_read() {
     local title="$1" prompt="$2" default_yes="$3"
     if has_whiptail; then
-        whiptail --title "$title" --yesno "$prompt" 12 50 </dev/tty && return 0 || return 1
+        whiptail --title "$title" --yesno "$prompt" 12 50 && return 0 || return 1
     else
-        read -rp "$prompt (y/n, 默认 $([ "$default_yes" = "yes" ] && echo "y" || echo "n")): " ans </dev/tty
+        read -rp "$prompt (y/n, 默认 $([ "$default_yes" = "yes" ] && echo "y" || echo "n")): " ans
         [ "$default_yes" = "yes" ] && [[ ! "$ans" =~ ^[Nn] ]] && return 0 || [[ "$ans" =~ ^[Yy] ]] && return 0
         return 1
     fi
 }
 
 # ============================================================================
-# 配置阶段（与 r4 相同，略）
+# 配置阶段
 # ============================================================================
 choose_protocol() {
     echo -e "${C_YELLOW}╔══════════════════════════════════════════════════╗${C_NC}"
@@ -190,9 +180,9 @@ configure_network() {
         opts+=("none" "不使用 IPv4 出口" "manual" "手动输入")
         IPV4_OUT=$(menu_or_read "IPv4出口" "选择 IPv4 出口:" "none" "${opts[@]}")
         [ "$IPV4_OUT" = "none" ] && IPV4_OUT=""
-        [ "$IPV4_OUT" = "manual" ] && { read -rp "输入 IPv4: " IPV4_OUT </dev/tty; }
+        [ "$IPV4_OUT" = "manual" ] && { read -rp "输入 IPv4: " IPV4_OUT; }
     else
-        read -rp "未检测到 IPv4，手动输入 (留空跳过): " IPV4_OUT </dev/tty
+        read -rp "未检测到 IPv4，手动输入 (留空跳过): " IPV4_OUT
     fi
     [ -n "$IPV4_OUT" ] && info "IPv4 出口: $IPV4_OUT" || info "不使用 IPv4 出口"
 
@@ -202,9 +192,9 @@ configure_network() {
         opts+=("none" "不使用 IPv6 出口" "manual" "手动输入")
         IPV6_OUT=$(menu_or_read "IPv6出口" "选择 IPv6 出口:" "none" "${opts[@]}")
         [ "$IPV6_OUT" = "none" ] && IPV6_OUT=""
-        [ "$IPV6_OUT" = "manual" ] && { read -rp "输入 IPv6: " IPV6_OUT </dev/tty; }
+        [ "$IPV6_OUT" = "manual" ] && { read -rp "输入 IPv6: " IPV6_OUT; }
     else
-        read -rp "未检测到 IPv6，手动输入 (留空跳过): " IPV6_OUT </dev/tty
+        read -rp "未检测到 IPv6，手动输入 (留空跳过): " IPV6_OUT
     fi
     [ -n "$IPV6_OUT" ] && info "IPv6 出口: $IPV6_OUT" || info "不使用 IPv6 出口"
 }
@@ -267,10 +257,10 @@ configure_landing() {
     LANDING_TYPE=$(menu_or_read "落地方式" "选择出站方式:" "direct" \
         "direct" "直接落地 (freedom)" "socks" "SOCKS5 落地")
     if [ "$LANDING_TYPE" = "socks" ]; then
-        read -rp "SOCKS5 IP: " SOCKS_IP </dev/tty
-        read -rp "SOCKS5 端口: " SOCKS_PORT </dev/tty
-        read -rp "SOCKS5 用户名: " SOCKS_USER </dev/tty
-        read -rp "SOCKS5 密码: " SOCKS_PASS </dev/tty
+        read -rp "SOCKS5 IP: " SOCKS_IP
+        read -rp "SOCKS5 端口: " SOCKS_PORT
+        read -rp "SOCKS5 用户名: " SOCKS_USER
+        read -rp "SOCKS5 密码: " SOCKS_PASS
     fi
 }
 
@@ -280,8 +270,8 @@ configure_landing() {
 build_config_json() {
     if ! command -v jq &>/dev/null; then
         info "安装 jq..."
-        apt-get update -qq && apt-get install -y -qq jq 2>/dev/null || \
-        yum install -y -q jq 2>/dev/null || \
+        (apt-get update -qq && apt-get install -y -qq jq) 2>/dev/null || \
+        (yum install -y -q jq) 2>/dev/null || \
         die "无法安装 jq，请手动安装后重试"
     fi
 
@@ -341,9 +331,6 @@ build_config_json() {
         '{log:{loglevel:"warning"},inbounds:$inbound,outbounds:$outbounds}|if $routing!=null then .+{routing:$routing} else . end'
 }
 
-# ============================================================================
-# 密钥生成
-# ============================================================================
 generate_keys() {
     if [ "$PROTOCOL" = "reality" ]; then
         local out; out=$("${WORKDIR}/xray" x25519)
@@ -367,16 +354,11 @@ generate_keys() {
     fi
 }
 
-# ============================================================================
-# 安装
-# ============================================================================
 install_xray() {
     info "下载 Xray-core ${XRAY_VER}..."
     local zip
     case "$ARCH" in
-        amd64)      zip="Xray-linux-64.zip";;
-        386)        zip="Xray-linux-32.zip";;
-        arm64-v8a)  zip="Xray-linux-arm64-v8a.zip";;
+        amd64) zip="Xray-linux-64.zip";; 386) zip="Xray-linux-32.zip";; arm64-v8a) zip="Xray-linux-arm64-v8a.zip";;
     esac
     wget -q "${XRAY_URL}/${zip}" -O "${WORKDIR}/xray.zip"
     unzip -o "${WORKDIR}/xray.zip" -d "$WORKDIR" >/dev/null
@@ -392,14 +374,12 @@ install_sni_filter() {
     unzip -o "${WORKDIR}/autobuild.zip" -d "$WORKDIR" >/dev/null
     rm -f "${WORKDIR}/autobuild.zip"
     case "$ARCH" in
-        amd64)     mv "${WORKDIR}/sni-filter-amd64" "${WORKDIR}/sni-filter";;
-        386)       mv "${WORKDIR}/sni-filter-i386"  "${WORKDIR}/sni-filter";;
+        amd64) mv "${WORKDIR}/sni-filter-amd64" "${WORKDIR}/sni-filter";;
+        386)   mv "${WORKDIR}/sni-filter-i386"  "${WORKDIR}/sni-filter";;
         arm64-v8a) mv "${WORKDIR}/sni-filter-arm64" "${WORKDIR}/sni-filter";;
     esac
     chmod 755 "${WORKDIR}/sni-filter"
-    # 注意：不再使用 setcap（依赖文件系统 extended attributes），
-    # 改用 systemd AmbientCapabilities（见 install_service）
-    info "SNI Filter 安装完成"
+    info "SNI Filter 安装完成（权限由 systemd AmbientCapabilities 提供）"
 }
 
 setup_user() {
@@ -408,9 +388,6 @@ setup_user() {
     info "降权用户 xrayuser 已就绪"
 }
 
-# ============================================================================
-# 启动器 & DDNS
-# ============================================================================
 generate_launcher() {
     if [ "$PROTOCOL" = "reality" ]; then
         cat > "${WORKDIR}/xrayinit" << LAUNCHER
@@ -455,20 +432,14 @@ IPADDR="__IPADDR__"; PORT="__PORT__"; REALITY_DOMAIN="__REALITY_DOMAIN__"
 read -r ddns_type target_ip strategy < "${WORKDIR}/ddns.config"
 
 check_alive() {
-    if [ "$ddns_type" = "ipv6" ]; then
-        ip -6 addr show 2>/dev/null | grep -qF "$target_ip"
-    else
-        ip -4 addr show 2>/dev/null | grep -oP 'inet \d+\.\d+\.\d+\.\d+' | grep -qF "$target_ip"
-    fi
+    if [ "$ddns_type" = "ipv6" ]; then ip -6 addr show 2>/dev/null | grep -qF "$target_ip"
+    else ip -4 addr show 2>/dev/null | grep -oP 'inet \d+\.\d+\.\d+\.\d+' | grep -qF "$target_ip"; fi
 }
 check_alive && exit 0
 
 get_ips() {
-    if [ "$ddns_type" = "ipv6" ]; then
-        ip -6 addr show 2>/dev/null | grep -oP 'inet6 [0-9a-f:]+' | awk '{print $2}' | grep -v '^fe80:' | grep -v '^::1'
-    else
-        ip -4 addr show 2>/dev/null | grep -oP 'inet \d+\.\d+\.\d+\.\d+'
-    fi
+    if [ "$ddns_type" = "ipv6" ]; then ip -6 addr show 2>/dev/null | grep -oP 'inet6 [0-9a-f:]+' | awk '{print $2}' | grep -v '^fe80:' | grep -v '^::1'
+    else ip -4 addr show 2>/dev/null | grep -oP 'inet \d+\.\d+\.\d+\.\d+'; fi
 }
 
 new_ip=""; available=$(get_ips)
@@ -476,16 +447,11 @@ if [ "$strategy" = "any" ]; then
     for ip in $available; do [ "$ip" != "$target_ip" ] && { new_ip="$ip"; break; }; done
 else
     case "$strategy" in
-        match12) prefix="$(echo "$target_ip" | cut -d: -f1):" ;;
-        match28) prefix="$(echo "$target_ip" | cut -d: -f1-2):" ;;
-        match48) prefix="$(echo "$target_ip" | cut -d: -f1-3):" ;;
-        match8)  prefix="$(echo "$target_ip" | cut -d. -f1)." ;;
-        match16) prefix="$(echo "$target_ip" | cut -d. -f1-2)." ;;
-        match24) prefix="$(echo "$target_ip" | cut -d. -f1-3)." ;;
+        match12) prefix="$(echo "$target_ip" | cut -d: -f1):" ;; match28) prefix="$(echo "$target_ip" | cut -d: -f1-2):" ;;
+        match48) prefix="$(echo "$target_ip" | cut -d: -f1-3):" ;; match8)  prefix="$(echo "$target_ip" | cut -d. -f1)." ;;
+        match16) prefix="$(echo "$target_ip" | cut -d. -f1-2)." ;; match24) prefix="$(echo "$target_ip" | cut -d. -f1-3)." ;;
     esac
-    for ip in $available; do
-        case "$ip" in "$prefix"*) [ "$ip" != "$target_ip" ] && { new_ip="$ip"; break; } ;; esac
-    done
+    for ip in $available; do case "$ip" in "$prefix"*) [ "$ip" != "$target_ip" ] && { new_ip="$ip"; break; } ;; esac; done
 fi
 
 [ -z "$new_ip" ] && exit 0
@@ -514,9 +480,6 @@ EOSCRIPT
     info "DDNS 检测脚本已生成"
 }
 
-# ============================================================================
-# 管理脚本
-# ============================================================================
 generate_management() {
     echo -n "$UUID" > "${WORKDIR}/uuid.txt"
     echo "$PROTOCOL" > "${WORKDIR}/protocol.txt"
@@ -533,7 +496,6 @@ generate_management() {
         sub_params="encryption=$(urlencode "$ENC_ENCRYPTION_STR")&flow=xtls-rprx-vision&security=none&type=tcp&headerType=none"
     fi
 
-    # chaguuid
     cat > "${WORKDIR}/chaguuid" << MGMT
 #!/bin/bash
 set -e
@@ -564,7 +526,6 @@ echo "UUID 已更换: \$newuuid"
 MGMT
     chmod 755 "${WORKDIR}/chaguuid"
 
-    # delxray
     cat > "${WORKDIR}/delxray" << MGMT
 #!/bin/bash
 systemctl stop ${SERVICE_NAME} 2>/dev/null || true
@@ -621,7 +582,6 @@ journalctl -u ${SERVICE_NAME} -n 50 --no-pager "\$@"
 MGMT
     chmod 755 "${WORKDIR}/xraylog"
 
-    # 链接到两个常用 PATH
     for cmd in chaguuid delxray xraystop xraystart xrayrestart xrayhelp xraystatus xraylog; do
         local linkname="${cmd#xray}"
         [ "$linkname" = "$cmd" ] && linkname="$cmd"
@@ -631,12 +591,8 @@ MGMT
     info "管理命令已安装到 /usr/bin/ 和 /usr/local/bin/"
 }
 
-# ============================================================================
-# systemd（核心修复！）
-# ============================================================================
 install_service() {
     local mtu_line=""
-    # MTU 调整用 + 前缀确保以 root 运行
     [ "$MTU_ENABLED" = "yes" ] && mtu_line="ExecStartPre=+/usr/sbin/ip link set dev ${MTU_IF} mtu ${MTU_VAL}"
     local label; [ "$PROTOCOL" = "reality" ] && label="REALITY" || label="VLESS Encryption"
 
@@ -650,7 +606,6 @@ Type=simple
 ${mtu_line}
 ExecStart=/usr/bin/sh ${WORKDIR}/xrayinit
 User=xrayuser
-# ★ 核心修复：允许 xrayuser 绑定特权端口（不再依赖 setcap）
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 Restart=on-failure
@@ -663,50 +618,23 @@ EOF
     info "systemd 服务已安装（含 CAP_NET_BIND_SERVICE 权限）"
 }
 
-# ============================================================================
-# 启动验证
-# ============================================================================
 verify_startup() {
-    sleep 2
-    local ok=1
+    sleep 2; local ok=1
 
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        info "systemd 服务: 运行中 ✓"
-    else
-        warn "systemd 服务: 未运行 ✗"; ok=0
-    fi
-
-    if ss -tlnp 2>/dev/null | grep -q ":${PORT}\b"; then
-        info "端口 ${PORT}: 已监听 ✓"
-    else
-        warn "端口 ${PORT}: 未监听 ✗"; ok=0
-    fi
-
-    if pgrep -f "${WORKDIR}/xray" >/dev/null 2>&1; then
-        info "xray 进程: 运行中 ✓"
-    else
-        warn "xray 进程: 未运行 ✗"; ok=0
-    fi
-
+    systemctl is-active --quiet "$SERVICE_NAME" && info "systemd 服务: 运行中 ✓" || { warn "systemd 服务: 未运行 ✗"; ok=0; }
+    ss -tlnp 2>/dev/null | grep -q ":${PORT}\b" && info "端口 ${PORT}: 已监听 ✓" || { warn "端口 ${PORT}: 未监听 ✗"; ok=0; }
+    pgrep -f "${WORKDIR}/xray" >/dev/null 2>&1 && info "xray 进程: 运行中 ✓" || { warn "xray 进程: 未运行 ✗"; ok=0; }
     if [ "$PROTOCOL" = "reality" ]; then
-        if pgrep -f "${WORKDIR}/sni-filter" >/dev/null 2>&1; then
-            info "sni-filter 进程: 运行中 ✓"
-        else
-            warn "sni-filter 进程: 未运行 ✗"; ok=0
-        fi
+        pgrep -f "${WORKDIR}/sni-filter" >/dev/null 2>&1 && info "sni-filter 进程: 运行中 ✓" || { warn "sni-filter 进程: 未运行 ✗"; ok=0; }
     fi
 
-    if [ $ok -eq 0 ]; then
+    [ $ok -eq 0 ] && {
         warn "排查命令:"
         echo "  systemctl status ${SERVICE_NAME}"
         echo "  journalctl -u ${SERVICE_NAME} -n 30"
-        echo "  ${WORKDIR}/xray -test -c ${CONFIG_FILE}"
-    fi
+    }
 }
 
-# ============================================================================
-# 最终输出
-# ============================================================================
 print_info() {
     local r4 r6
     r4=$(wget -q4 -O- https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' || echo "")
@@ -734,15 +662,11 @@ print_info() {
     info "管理命令: xray.start | xray.stop | xray.restart | xray.chuuid | xray.delxray | xray.status | xray.log | xray.help"
 }
 
-# ============================================================================
-# 清理
-# ============================================================================
 cleanup() {
     local ec=$?
     if [ $ec -ne 0 ] && [ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ]; then
         warn "安装失败 (退出码: $ec)，正在清理..."
-        pgrep -f "${WORKDIR}/xray" 2>/dev/null | xargs -r kill 2>/dev/null || true
-        pgrep -f "${WORKDIR}/sni-filter" 2>/dev/null | xargs -r kill 2>/dev/null || true
+        pgrep -f "${WORKDIR}/" 2>/dev/null | xargs -r kill 2>/dev/null || true
         rm -rf "$WORKDIR"
         rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
         systemctl daemon-reload 2>/dev/null || true
@@ -750,9 +674,6 @@ cleanup() {
     exit $ec
 }
 
-# ============================================================================
-# 主入口
-# ============================================================================
 main() {
     trap cleanup EXIT
 
@@ -766,10 +687,7 @@ main() {
     echo ""
     sleep 1
 
-    check_root
-    check_net
-    check_cmd wget openssl unzip
-    detect_arch
+    check_root; check_net; check_cmd wget openssl unzip; detect_arch
 
     WORKDIR="/var/xray"
     mkdir -p "${WORKDIR}/socket"
@@ -777,42 +695,26 @@ main() {
     PIDFILE_XRAY="${WORKDIR}/xray.pid"
     PIDFILE_SNI="${WORKDIR}/sni-filter.pid"
 
-    choose_protocol
-    detect_ips
-    configure_network
-    configure_ddns
-    configure_mtu
-    configure_protocol_params
-    configure_landing
+    choose_protocol; detect_ips; configure_network; configure_ddns; configure_mtu
+    configure_protocol_params; configure_landing
 
-    install_xray
-    install_sni_filter
-
-    UUID=$("${WORKDIR}/xray" uuid)
-    generate_keys
+    install_xray; install_sni_filter
+    UUID=$("${WORKDIR}/xray" uuid); generate_keys
 
     build_config_json > "$CONFIG_FILE"
     info "配置文件: $CONFIG_FILE"
 
     if ! "${WORKDIR}/xray" -test -c "$CONFIG_FILE" &>/dev/null; then
-        warn "配置验证失败:"
-        "${WORKDIR}/xray" -test -c "$CONFIG_FILE" 2>&1 || true
-        cat "$CONFIG_FILE"
-        die "请检查配置文件后重试"
+        warn "配置验证失败:"; "${WORKDIR}/xray" -test -c "$CONFIG_FILE" 2>&1 || true
+        cat "$CONFIG_FILE"; die "请检查配置文件后重试"
     fi
     info "配置验证通过 ✓"
 
-    setup_user
-    generate_launcher
-    generate_ddns_script
-    generate_management
-
+    setup_user; generate_launcher; generate_ddns_script; generate_management
     install_service
-    systemctl enable "$SERVICE_NAME"
-    systemctl start "$SERVICE_NAME"
+    systemctl enable "$SERVICE_NAME"; systemctl start "$SERVICE_NAME"
 
-    verify_startup
-    print_info
+    verify_startup; print_info
     trap - EXIT
 }
 

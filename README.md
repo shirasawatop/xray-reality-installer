@@ -8,6 +8,9 @@ Xray REALITY 一键安装脚本
 - 自动生成配置和管理脚本
 ## 安装命令
 wget -N https://raw.githubusercontent.com/shirasawatop/xray-reality-installer/refs/heads/main/xrayREALITY.sh && bash xrayREALITY.sh
+## 前提条件
+- 需提前安装unzip
+sudo apt update && sudo apt install unzip -y
 ## 参考项目
 - oldfriendme/xrayREALITY
 ## 参考项目地址

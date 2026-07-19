@@ -10,6 +10,7 @@ Xray REALITY 一键安装脚本
 wget -N https://raw.githubusercontent.com/shirasawatop/xray-reality-installer/refs/heads/main/xrayREALITY.sh && bash xrayREALITY.sh
 ## 前提条件
 - 需提前安装unzip
+## 安装命令
 sudo apt update && sudo apt install unzip -y
 ## 参考项目
 - oldfriendme/xrayREALITY

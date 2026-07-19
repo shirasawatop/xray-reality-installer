@@ -26,3 +26,8 @@ wget -N https://raw.githubusercontent.com/shirasawatop/xray-reality-installer/re
 ✓ hy2相关部分
 ## 安装命令
 wget -N https://raw.githubusercontent.com/shirasawatop/xray-reality-installer/refs/heads/main/xrayREALITY3.sh && bash xrayREALITY3.sh
+# xrayREALITY4
+## 新增功能
+✓ 加入vless encryption协议
+## 安装命令
+wget -N https://raw.githubusercontent.com/shirasawatop/xray-reality-installer/refs/heads/main/xrayREALITY4.sh && bash xrayREALITY4.sh

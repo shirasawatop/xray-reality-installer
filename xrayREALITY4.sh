@@ -319,9 +319,9 @@ mkdir -p $workdir
 cd $workdir
 arch=$(uname -m)
 case $arch in
-    x86_64) url="https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-64.zip";;
-    i386|i686) url="https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-32.zip";;
-    aarch64) url="https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-arm64-v8a.zip";;
+    x86_64) url="https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip";;
+    i386|i686) url="https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-32.zip";;
+    aarch64) url="https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-arm64-v8a.zip";;
     *) echo "未知架构: $arch"; exit 1;;
 esac
 wget -q $url -O xray.zip

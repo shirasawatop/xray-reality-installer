@@ -577,6 +577,7 @@ EOSH
     sed -i "s|DDNS_DIR|$workdir|g" ddns_check.sh
     chmod +x ddns_check.sh
     echo "$ddns_type $ddns_target_ip $ddns_strategy" > ddns.config
+    chown xrayuser:xrayuser ddns.config && chmod 600 ddns.config
 
     cat >> xrayinit << EOF
 while true; do
